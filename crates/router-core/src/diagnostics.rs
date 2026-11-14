@@ -7,7 +7,7 @@
 //! element are covered. A body that's neither XML nor JSON is left out rather than guessed at.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
@@ -150,6 +150,8 @@ const NAME_MAX: usize = 48;
 /// A value hidden only for its name is remembered, for the check of included code, from this
 /// length up.
 const SOFT_MIN: usize = 8;
+/// A longer value than this is a blob, not a name or a number someone would know again.
+const SOFT_MAX: usize = 256;
 
 /// Sensitive in a capture as well: a page can show messages, contacts and Wi-Fi secrets that the
 /// app's own reads never touch.
@@ -413,6 +415,8 @@ fn plain_name(s: &str) -> bool {
         && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !(s.len() >= 16 && digits >= 4)
+        // With nothing joining its parts, three digits among letters is a token, not a name.
+        && (digits < 3 || s.contains('_'))
         && identifier_hits(s).is_empty()
 }
 
@@ -483,8 +487,8 @@ pub struct Redactor {
     secrets: BTreeSet<String>,
     /// Values hidden only for their name, under the capture's rules.
     soft: BTreeSet<String>,
-    /// Every value hidden under a sensitive name or in a login, ordinary words too (but not a
-    /// setting's one word): a path segment that is one of them is somebody's.
+    /// Every value that was hidden for any reason, ordinary words too (but not a setting's one
+    /// word): a path segment that is one of them is somebody's.
     inside: BTreeSet<String>,
     /// What an earlier pass over the same recording hid (`knowing`).
     known: BTreeSet<String>,
@@ -640,17 +644,25 @@ impl Redactor {
             Hide::Inside if !ordinary => {
                 self.secrets.insert(value.to_string());
             }
-            Hide::Unlisted if !ordinary && value.len() >= SOFT_MIN => {
+            Hide::Unlisted if !ordinary && (SOFT_MIN..=SOFT_MAX).contains(&value.len()) => {
                 self.soft.insert(value.to_string());
             }
             _ => {}
         }
         let secret = hide != Hide::Unlisted;
-        if secret && value.len() <= 64 && !enum_word(value) {
+        if value.len() <= 64 && !enum_word(value) {
             self.inside.insert(value.to_string());
         }
         if self.rules == Rules::ShapeOnly || (secret && self.rules == Rules::Capture) {
             return HIDDEN.to_string();
+        }
+        if self.rules != Rules::Diagnostics && value.len() > KEPT_MAX {
+            // A megabyte of stand-in tells nobody anything: say how long the value was.
+            let start = synth("alnum", 16, label);
+            let fake = format!("{start}[{} more]", value.len() - 16);
+            self.generated.insert(start);
+            self.generated.insert(fake.clone());
+            return fake;
         }
         self.counter += 1;
         let n = self.counter;
@@ -903,7 +915,9 @@ impl Redactor {
                 let text = n.to_string();
                 // A state's code is short, as a number too.
                 let long_state = keep_class(key) == Some(Keep::State) && text.len() > 8;
-                if self.hides(key) || long_state || !identifier_hits(&text).is_empty() {
+                // A number that was hidden somewhere else isn't kept here either.
+                let hidden = self.holds_secret(&text);
+                if self.hides(key) || long_state || hidden || !identifier_hits(&text).is_empty() {
                     let fake = self.stand_in(&text, label, Hide::Unlisted);
                     fake.parse::<u64>()
                         .map(Value::from)
@@ -941,15 +955,13 @@ impl Redactor {
         if spot == Spot::Json && text.contains('<') {
             return self.xml(text, label);
         }
-        if self.holds_secret(text) {
+        // Before anything that reads the whole of it: a megabyte isn't a reading.
+        if text.len() > NAME_LIST_MAX || self.holds_secret(text) {
             return self.stand_in(text, label, Hide::Unlisted);
         }
         // `cmd=rsrp,sinr,lte_band`: the field names a command asks for. Each is kept only when
         // the answer really has a field of that name, so nothing else can ride in the list.
-        if text.contains(',')
-            && text.len() <= NAME_LIST_MAX
-            && words(name).iter().any(|w| w == "cmd")
-        {
+        if text.contains(',') && words(name).iter().any(|w| w == "cmd") {
             let items: Vec<&str> = text
                 .split(',')
                 .map(|item| {
@@ -1019,22 +1031,24 @@ impl Redactor {
     /// found in `wifi_enable`; anything else is looked for as it is, with and without the
     /// backslashes a file or a script puts before a quote.
     pub fn holds_secret(&self, text: &str) -> bool {
-        let loose = text.replace('\\', "");
-        let tokens: BTreeSet<&str> = text.split(|c: char| !word(c)).collect();
-        self.secrets
-            .iter()
-            .chain(&self.known)
-            .filter(|s| !self.generated.contains(*s))
-            .any(|s| {
-                if s.chars().all(word) {
-                    s.len() >= 4 && tokens.contains(s.as_str())
-                } else {
-                    s.len() >= 6 && written_in(text, &loose, s)
-                }
-            })
+        let all = || {
+            self.secrets
+                .iter()
+                .chain(&self.known)
+                .filter(|s| !self.generated.contains(*s))
+        };
+        let tokens: HashSet<&str> = text.split(|c: char| !word(c)).collect();
+        if all().any(|s| s.len() >= 4 && s.chars().all(word) && tokens.contains(s.as_str())) {
+            return true;
+        }
+        let phrases: Vec<&str> = all()
+            .filter(|s| s.len() >= 6 && !s.chars().all(word))
+            .map(String::as_str)
+            .collect();
+        held(text, &phrases)
     }
 
-    /// Whether this exact word was hidden under a sensitive name or in a login. For a path's
+    /// Whether this exact word was hidden as a value anywhere, for any reason. For a path's
     /// segments: `/api/hosts/Hibi-Laptop` names the device the list of hosts hid.
     pub fn hidden_word(&self, word: &str) -> bool {
         self.inside.contains(word) || self.secrets.contains(word) || self.known.contains(word)
@@ -1044,8 +1058,8 @@ impl Redactor {
     /// for whatever reason. For text that can't be parsed by name (a router's script), before it
     /// is let into a file.
     pub fn holds_hidden(&self, text: &str) -> bool {
-        let loose = text.replace('\\', "");
-        self.holds_secret(text) || self.soft.iter().any(|s| written_in(text, &loose, s))
+        let soft: Vec<&str> = self.soft.iter().map(String::as_str).collect();
+        self.holds_secret(text) || held(text, &soft)
     }
 
     /// The leak scan of redact-har.mjs over the finished text. Any hit blocks the export.
@@ -1073,6 +1087,55 @@ impl Redactor {
             .replace("\\r", " ");
         pattern_hits(&strip_harmless_fields(&plain), &self.generated)
     }
+}
+
+/// Whether any of `needles` is in `text`, in one pass for all of them: a recording can hide
+/// hundreds of values, and the text is megabytes.
+fn any_in(text: &str, needles: &[&str]) -> bool {
+    const AT_ONCE: usize = 400;
+    let (short, long): (Vec<&str>, Vec<&str>) = needles
+        .iter()
+        .copied()
+        .filter(|n| !n.is_empty())
+        .partition(|n| n.len() <= SOFT_MAX);
+    if long.iter().any(|n| text.contains(n)) {
+        return true;
+    }
+    if text.len() < 4096 {
+        return short.iter().any(|n| text.contains(n));
+    }
+    short.chunks(AT_ONCE).any(|chunk| {
+        let any = chunk
+            .iter()
+            .map(|n| regex::escape(n))
+            .collect::<Vec<_>>()
+            .join("|");
+        match regex::RegexBuilder::new(&any).size_limit(64 << 20).build() {
+            Ok(re) => re.is_match(text),
+            // Never answer "not there" without looking.
+            Err(_) => chunk.iter().any(|n| text.contains(n)),
+        }
+    })
+}
+
+/// Whether `text` holds any of `values`, as they are or written with escapes: a finished JSON
+/// file and a script both put a backslash before a quote.
+fn held(text: &str, values: &[&str]) -> bool {
+    if values.is_empty() {
+        return false;
+    }
+    if any_in(text, values) {
+        return true;
+    }
+    if !text.contains('\\') {
+        return false;
+    }
+    let loose = text.replace('\\', "");
+    let plain: Vec<String> = values.iter().map(|v| v.replace('\\', "")).collect();
+    any_in(
+        &loose,
+        &plain.iter().map(String::as_str).collect::<Vec<_>>(),
+    )
 }
 
 /// Whether `text` holds `value`, as it is or written with escapes: a finished JSON file and a

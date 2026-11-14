@@ -629,9 +629,12 @@ fn shown_path(red: &Redactor, path: &str) -> String {
     let cleaned = probe::clean_path(path);
     let segment = |s: &str| {
         let folder = s.len() >= 12 && s.chars().all(|c| c.is_ascii_uppercase());
-        let number = s.len() >= 5 && s.chars().all(|c| c.is_ascii_digit());
+        let digits = s.bytes().filter(u8::is_ascii_digit).count();
+        let number = s.len() >= 5 && digits == s.len();
+        // Three digits among letters with nothing joining them is a token, not a route's word.
+        let token = digits >= 3 && digits < s.len() && !s.contains(['_', '-', '.']);
         let stem = s.rsplit_once('.').map_or(s, |(stem, _)| stem);
-        if folder || number || red.hidden_word(s) || red.hidden_word(stem) {
+        if folder || number || token || red.hidden_word(s) || red.hidden_word(stem) {
             "*".to_string()
         } else {
             s.to_string()
@@ -3000,5 +3003,323 @@ mod tests {
             rec.into_exchanges()[0].redirect_to.as_deref(),
             Some(TOO_LONG)
         );
+    }
+
+    // ---- The whole build: numbers, size, and secrets planted at random ----
+
+    #[test]
+    fn a_number_hidden_in_one_place_is_not_kept_in_another() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/cell",
+            "application/json",
+            r#"{"tac":"1300","band":"3"}"#,
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/radio",
+            "application/json",
+            r#"{"earfcn":1300,"band":3}"#,
+        );
+        let (_, v) = built(rec, &opts());
+        assert_ne!(v["exchanges"][1]["response"]["earfcn"], json!(1300));
+        assert_eq!(v["exchanges"][1]["response"]["band"], json!(3));
+    }
+
+    /// A small generator with a fixed seed, so a failure can be run again.
+    struct Dice(u64);
+
+    impl Dice {
+        fn roll(&mut self, sides: usize) -> usize {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((self.0 >> 33) as usize) % sides
+        }
+
+        fn pick<'a>(&mut self, from: &[&'a str]) -> &'a str {
+            from[self.roll(from.len())]
+        }
+    }
+
+    /// A new marked secret, in one of the shapes a secret takes: a word with digits in mixed
+    /// case, words with hyphens, capitals with digits, a hash.
+    fn plant(markers: &mut Vec<String>, dice: &mut Dice, seed: u64) -> String {
+        let n = markers.len();
+        let m = match dice.roll(4) {
+            0 => format!("Zq{n}Marker7x{seed}"),
+            1 => format!("zq-marker-{n}-{seed}-home"),
+            2 => format!("ZQMARK{n:04}X{seed:04}Q9"),
+            _ => format!("zq{n:02}{seed:02}c0ffee11d00d22beef33"),
+        };
+        markers.push(m.clone());
+        m
+    }
+
+    #[test]
+    fn secrets_planted_at_random_never_reach_the_file_and_never_stop_the_save() {
+        // Names whose values must be hidden: sensitive, or simply not on the keep list.
+        const HIDING: &[&str] = &[
+            "password",
+            "WifiSsid",
+            "wpa_psk",
+            "imei",
+            "session",
+            "token",
+            "hostname",
+            "DeviceName",
+            "note",
+            "value",
+            "data",
+            "comment",
+            "sn",
+            "user",
+            "mac_address",
+            "msg",
+        ];
+        // Names that are kept, with values that are what they say.
+        const KEPT: &[(&str, &str)] = &[
+            ("lte_rsrp", "-97"),
+            ("sinr", "12dB"),
+            ("band", "3"),
+            ("network_type", "5G NSA"),
+            ("status", "connected"),
+            ("mode", "auto"),
+            ("error_code", "0"),
+        ];
+        for seed in 0..40u64 {
+            let mut dice = Dice(seed * 7919 + 1);
+            let mut markers: Vec<String> = Vec::new();
+            let mut rec = recorder();
+            for i in 0..12 {
+                let id = i.to_string();
+                // A body of random depth: kept readings beside hidden values.
+                let mut body = Map::new();
+                // The last value planted in this body, which nothing after it can overwrite.
+                let mut in_body = String::new();
+                for _ in 0..(2 + dice.roll(5)) {
+                    let (k, v) = KEPT[dice.roll(KEPT.len())];
+                    body.insert(k.to_string(), json!(v));
+                    in_body = plant(&mut markers, &mut dice, seed);
+                    let hidden = json!(in_body);
+                    let name = dice.pick(HIDING).to_string();
+                    match dice.roll(3) {
+                        0 => {
+                            body.insert(name, hidden);
+                        }
+                        1 => {
+                            body.insert("list".into(), json!([{ name: hidden }, { "band": "3" }]));
+                        }
+                        _ => {
+                            // The marker as a name: data where a name should be.
+                            let key = plant(&mut markers, &mut dice, seed);
+                            body.insert("map".into(), json!({ key: { name: hidden } }));
+                        }
+                    }
+                }
+                let body = Value::Object(body).to_string();
+                match dice.roll(5) {
+                    0 => {
+                        // A login: everything it sends and gets is hidden.
+                        let sent = json!({ "postData": json!({ "password": plant(&mut markers, &mut dice, seed), "band": plant(&mut markers, &mut dice, seed) }).to_string() });
+                        post(
+                            &mut rec,
+                            &id,
+                            "http://192.168.8.1/api/login",
+                            sent,
+                            "application/json",
+                            &body,
+                        );
+                    }
+                    1 => {
+                        // A value in a header, and a path that names what the answer hides.
+                        let headers = json!({ "X-Token": plant(&mut markers, &mut dice, seed), "Cookie": plant(&mut markers, &mut dice, seed) });
+                        let url = format!("http://192.168.8.1/api/hosts/{in_body}/info");
+                        exchange(
+                            &mut rec,
+                            &id,
+                            "GET",
+                            &url,
+                            "XHR",
+                            json!({ "headers": headers }),
+                            "application/json",
+                            &body,
+                        );
+                    }
+                    2 => {
+                        // Another host, a page and a script: none of their text is kept.
+                        let m = plant(&mut markers, &mut dice, seed);
+                        sent(
+                            &mut rec,
+                            &id,
+                            "GET",
+                            &format!("http://other.example/{m}"),
+                            "Fetch",
+                            json!({}),
+                            json!({}),
+                        );
+                        let page = format!(
+                            "<html><input value=\"{}\"></html>",
+                            plant(&mut markers, &mut dice, seed)
+                        );
+                        exchange(
+                            &mut rec,
+                            &format!("p{id}"),
+                            "GET",
+                            "http://192.168.8.1/index.html",
+                            "Document",
+                            json!({}),
+                            "text/html",
+                            &page,
+                        );
+                        let script = format!("var k = '{}';", plant(&mut markers, &mut dice, seed));
+                        exchange(
+                            &mut rec,
+                            &format!("s{id}"),
+                            "GET",
+                            "http://192.168.8.1/js/a.js?x=1",
+                            "Script",
+                            json!({}),
+                            "application/javascript",
+                            &script,
+                        );
+                    }
+                    3 => {
+                        let xml = format!(
+                            "<response><WifiSsid>{}</WifiSsid><rsrp>-95dBm</rsrp><Hosts><Host><HostName>{}</HostName></Host></Hosts></response>",
+                            plant(&mut markers, &mut dice, seed),
+                            plant(&mut markers, &mut dice, seed)
+                        );
+                        poll(
+                            &mut rec,
+                            &id,
+                            "http://192.168.8.1/api/xml",
+                            "text/xml",
+                            &xml,
+                        );
+                    }
+                    _ => {
+                        let url = format!(
+                            "http://192.168.8.1/api/x?token={}&band=3",
+                            plant(&mut markers, &mut dice, seed)
+                        );
+                        poll(&mut rec, &id, &url, "application/json", &body);
+                    }
+                }
+            }
+            let list = rec.into_exchanges();
+            let text = match build(&list, &opts()) {
+                Ok(text) => text,
+                Err(found) => panic!("seed {seed}: the save was refused: {found:?}"),
+            };
+            for m in &markers {
+                // Where it is, when it is there: the name it sits under says which rule let it by.
+                let near = text.find(m.as_str()).map(|at| {
+                    let from = text[..at]
+                        .char_indices()
+                        .rev()
+                        .nth(160)
+                        .map_or(0, |(i, _)| i);
+                    &text[from..at]
+                });
+                assert!(
+                    near.is_none(),
+                    "seed {seed}: {m} is in the file, after: {near:?}"
+                );
+            }
+            // And the readings beside them are still there.
+            assert!(
+                text.contains("\"band\": \"3\""),
+                "seed {seed}: the readings are gone"
+            );
+        }
+    }
+
+    /// Not part of the usual run: `cargo test -p router-core capture -- --ignored --nocapture`.
+    /// The largest recording there can be, to see that cleaning it stays a matter of seconds.
+    #[test]
+    #[ignore = "a timing run, for a person to read"]
+    fn the_largest_recording_is_cleaned_in_seconds() {
+        let mut rec = recorder();
+        // About 300 hidden values, 500 exchanges and close to 20 MiB.
+        let mut fields = Map::new();
+        for i in 0..300 {
+            fields.insert(
+                format!("host_name_{i}"),
+                json!(format!("Device-{i}-of-the-house")),
+            );
+            fields.insert(format!("lte_rsrp_{i}"), json!("-97"));
+        }
+        let small = Value::Object(fields).to_string();
+        let filler = format!(
+            "{{\"status\":\"connected\",\"pad\":\"{}\"}}",
+            "x".repeat(1_900_000)
+        );
+        let script = format!("function app(){{ return 1; }} // {}", "y".repeat(1_900_000));
+        for i in 0..MAX_EXCHANGES {
+            let id = i.to_string();
+            match i {
+                0..=4 => poll(
+                    &mut rec,
+                    &id,
+                    "http://192.168.8.1/api/big",
+                    "application/json",
+                    &filler,
+                ),
+                5..=8 => exchange(
+                    &mut rec,
+                    &id,
+                    "GET",
+                    "http://192.168.8.1/js/app.js",
+                    "Script",
+                    json!({}),
+                    "application/javascript",
+                    &script,
+                ),
+                _ if i % 50 == 0 => poll(
+                    &mut rec,
+                    &id,
+                    "http://192.168.8.1/api/hosts",
+                    "application/json",
+                    &small,
+                ),
+                _ => poll(
+                    &mut rec,
+                    &id,
+                    "http://192.168.8.1/api/status",
+                    "application/json",
+                    r#"{"lte_rsrp":"-97","band":"3"}"#,
+                ),
+            }
+        }
+        let list = rec.into_exchanges();
+        let bytes: usize = list
+            .iter()
+            .map(|x| x.body.as_ref().map_or(0, String::len))
+            .sum();
+        for include_code in [false, true] {
+            let started = std::time::Instant::now();
+            let text = build(
+                &list,
+                &BuildOptions {
+                    include_code,
+                    ..opts()
+                },
+            )
+            .expect("a clean file");
+            println!(
+                "{} exchanges, {:.1} MiB recorded, code {}: cleaned in {:.1?}, {:.1} MiB written",
+                list.len(),
+                bytes as f64 / 1048576.0,
+                if include_code { "included" } else { "left out" },
+                started.elapsed(),
+                text.len() as f64 / 1048576.0
+            );
+            assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        }
     }
 }
