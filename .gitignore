@@ -54,3 +54,5 @@ speedtests.jsonl.imported
 
 # "Save router page scripts" output: the router maker's web UI code. Never commit it.
 router-page-scripts*.zip
+# A recording of a router's own page (About, Record). It is cleaned, and still one person's router.
+router-band-tuner-recording*.json
