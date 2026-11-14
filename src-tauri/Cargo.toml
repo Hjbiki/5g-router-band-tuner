@@ -42,9 +42,7 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 [target.'cfg(windows)'.dependencies]
 # CSV export: the Windows list separator, so Excel opens the file in columns.
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
-
-[target.'cfg(windows)'.dev-dependencies]
-# examples/capture_spike.rs only: the versions Tauri itself resolves to.
+# The recording window: the browser's own interface, in the versions Tauri itself resolves to.
 webview2-com = "0.38"
 windows-core = "0.61"
 

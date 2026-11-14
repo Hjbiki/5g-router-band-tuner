@@ -1,5 +1,7 @@
 pub mod autoscan;
 pub mod band_history;
+#[cfg(windows)]
+pub mod capture_window;
 pub mod commands;
 pub mod credentials;
 pub mod history;
