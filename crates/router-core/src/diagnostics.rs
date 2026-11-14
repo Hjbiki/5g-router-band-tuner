@@ -472,6 +472,16 @@ fn ubus_call(m: &Map<String, Value>) -> bool {
         })
 }
 
+/// What a reference in XML text stands for: a character by its number (`&#40;`, `&#x28;`) or
+/// one of XML's own five names. Anything else can't be read here.
+fn reference_text(r: &quick_xml::events::BytesRef<'_>) -> Option<String> {
+    if r.is_char_ref() {
+        return r.resolve_char_ref().ok().flatten().map(String::from);
+    }
+    let name = r.decode().ok()?;
+    quick_xml::escape::resolve_xml_entity(&name).map(str::to_string)
+}
+
 /// A version's own name, not one that could hold an address (`wanversion`).
 fn version_name(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
@@ -705,31 +715,39 @@ impl Redactor {
         // The open elements: name, whether they or a parent are sensitive, and the name written.
         let mut open: Vec<(String, bool, String)> = Vec::new();
         // Stricter rules than the app's own reads: an element's text is judged whole, so here is
-        // the text so far and the number of pieces it came in. A reference, a comment or CDATA
-        // breaks it into pieces, and each piece alone could pass for something it isn't.
+        // the text so far, and whether something broke it up. A character reference is read as
+        // the character it stands for (a router writes a bracket as `&#40;`), so the whole can
+        // still be judged. A comment, CDATA, an instruction or a reference nobody can read breaks
+        // it: each piece alone could pass for something it isn't.
         let strict = self.rules != Rules::Diagnostics;
-        let mut text: Option<(String, u32)> = None;
+        let mut text: Option<(String, bool)> = None;
         loop {
             let event = reader.read_event().ok()?;
             if strict {
-                let (piece, breaks) = match &event {
-                    Event::Text(t) => (String::from_utf8_lossy(t).into_owned(), 1),
-                    Event::CData(c) => (String::from_utf8_lossy(c).into_owned(), 2),
-                    Event::GeneralRef(_) | Event::Comment(_) | Event::PI(_) => (String::new(), 1),
+                let part = match &event {
+                    Event::Text(t) => Some((String::from_utf8_lossy(t).into_owned(), false)),
+                    Event::GeneralRef(r) => Some(match reference_text(r) {
+                        Some(c) => (c, false),
+                        None => (String::new(), true),
+                    }),
+                    Event::CData(c) => Some((String::from_utf8_lossy(c).into_owned(), true)),
+                    Event::Comment(_) | Event::PI(_) => Some((String::new(), true)),
                     // The declaration and the doctype are free text of their own.
                     Event::Decl(_) | Event::DocType(_) => continue,
-                    _ => (String::new(), 0),
+                    _ => None,
                 };
-                if breaks > 0 {
-                    let (so_far, pieces) = text.get_or_insert((String::new(), 0));
+                if let Some((piece, breaks)) = part {
+                    let (so_far, broken) = text.get_or_insert((String::new(), false));
                     so_far.push_str(&piece);
-                    *pieces += breaks;
+                    *broken |= breaks;
                     continue;
                 }
-                if let Some((raw, pieces)) = text.take() {
-                    let written = self.xml_text(&raw, pieces, &open, label);
+                if let Some((raw, broken)) = text.take() {
+                    let written = self.xml_text(&raw, broken, &open, label);
+                    // What is written is a stand-in or a plain value. Escaped all the same.
+                    let escaped = quick_xml::escape::partial_escape(&written).into_owned();
                     writer
-                        .write_event(Event::Text(BytesText::from_escaped(written)))
+                        .write_event(Event::Text(BytesText::from_escaped(escaped)))
                         .ok()?;
                 }
             }
@@ -777,12 +795,12 @@ impl Redactor {
         String::from_utf8(writer.into_inner()).ok()
     }
 
-    /// An element's whole text under the stricter rules. `pieces` over one means something broke
-    /// it up, and then it is hidden whatever its name.
+    /// An element's whole text under the stricter rules, with its character references read.
+    /// `broken` means something else broke it up, and then it is hidden whatever its name.
     fn xml_text(
         &mut self,
         raw: &str,
-        pieces: u32,
+        broken: bool,
         open: &[(String, bool, String)],
         label: &str,
     ) -> String {
@@ -794,7 +812,7 @@ impl Redactor {
         if secret {
             let why = self.named(&inside);
             self.stand_in(raw, &at, why)
-        } else if pieces > 1 || self.hides(&inside) {
+        } else if broken || self.hides(&inside) {
             self.stand_in(raw, &at, Hide::Unlisted)
         } else {
             self.kept(raw, &inside, &at, Spot::XmlText)

@@ -671,6 +671,8 @@ impl Facts {
         if x.kind == Kind::Script {
             return;
         }
+        // Only what can be shown is kept, so an answer that words it unusably doesn't stand in
+        // the way of a later one.
         if self.model.is_none() {
             // A list of the devices on the network has "device name" fields too, so that name
             // counts only when its value is shaped like a router's model.
@@ -679,24 +681,30 @@ impl Facts {
             // only in an answer that also gives a version.
             let versioned = probe::hardware_field(text).or_else(|| probe::firmware_field(text));
             let bare = probe::bare_model_field(text).filter(|_| versioned.is_some());
-            self.model = probe::strict_model_field(text).or(bare).or(loose);
+            let found = probe::strict_model_field(text).or(bare).or(loose);
+            self.model = found.and_then(Self::label);
         }
         if self.hardware.is_none() {
-            self.hardware = probe::hardware_field(text);
+            self.hardware = probe::hardware_field(text).and_then(Self::label);
         }
         if self.firmware.is_none() {
-            self.firmware = probe::firmware_field(text);
+            self.firmware = probe::firmware_field(text).and_then(Self::label);
         }
     }
 
     /// A model or a version: a plain label, and nothing the scan would call an identifier except
-    /// that a version reads like an IPv4 address.
-    fn label(value: &Option<String>) -> Option<String> {
-        value
-            .as_deref()
-            .filter(|v| probe::is_plain_label(v))
-            .filter(|v| identifier_hits(v).iter().all(|hit| hit.contains("IPv4")))
-            .map(str::to_string)
+    /// that a version reads like an IPv4 address. An XML answer may write a character as a
+    /// reference (a bracket as `&#40;`), which is read first.
+    fn label(value: String) -> Option<String> {
+        let value = match quick_xml::escape::unescape(&value) {
+            Ok(plain) if value.contains('&') => plain.into_owned(),
+            _ => value,
+        };
+        (probe::is_plain_label(&value)
+            && identifier_hits(&value)
+                .iter()
+                .all(|hit| hit.contains("IPv4")))
+        .then_some(value)
     }
 }
 
@@ -906,9 +914,9 @@ fn build_knowing(
     // These join after the scan, by their own rules: the vendor is one of a fixed list of
     // names, and a version looks like an IP address.
     file["router"]["vendor"] = json!(facts.vendor);
-    file["router"]["model"] = json!(Facts::label(&facts.model));
-    file["router"]["hardware"] = json!(Facts::label(&facts.hardware));
-    file["router"]["firmware"] = json!(Facts::label(&facts.firmware));
+    file["router"]["model"] = json!(facts.model);
+    file["router"]["hardware"] = json!(facts.hardware);
+    file["router"]["firmware"] = json!(facts.firmware);
     serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])
 }
 
@@ -1697,6 +1705,91 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<SoftwareVersion>11.0.2.21</SoftwareVersion>"));
+    }
+
+    #[test]
+    fn the_header_looks_past_a_version_it_cannot_show() {
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/a",
+            "XHR",
+            json!({}),
+            "text/xml",
+            "<response><SoftwareVersion>1.0 &lt;beta&gt;</SoftwareVersion></response>",
+        );
+        exchange(
+            &mut rec,
+            "2",
+            "GET",
+            "http://192.168.8.1/api/b",
+            "XHR",
+            json!({}),
+            "application/json",
+            r#"{"SoftwareVersion":"11.0.2.21(H300SP5C7001)","HardwareVersion":"WL1H122M Ver.C"}"#,
+        );
+        let (_, v) = built(rec, &opts());
+        assert_eq!(v["router"]["firmware"], json!("11.0.2.21(H300SP5C7001)"));
+        assert_eq!(v["router"]["hardware"], json!("WL1H122M Ver.C"));
+    }
+
+    /// The answer a real H122 gives, by its element names, with made-up values. The first real
+    /// recording came back with no firmware at all: the version has its build in brackets.
+    fn huawei_information(firmware: &str, web_ui: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<response>\n\
+             <DeviceName>H122-373</DeviceName>\n<SerialNumber>ABC1234567890123</SerialNumber>\n\
+             <Imei>356789012345678</Imei>\n<Imsi>420041234567890</Imsi>\n\
+             <Iccid>89966041234567890123</Iccid>\n<Msisdn></Msisdn>\n\
+             <HardwareVersion>WL1H122M</HardwareVersion>\n\
+             <SoftwareVersion>{firmware}</SoftwareVersion>\n<WebUIVersion>{web_ui}</WebUIVersion>\n\
+             <MacAddress1>A4:B1:C2:D3:E4:F5</MacAddress1>\n<MacAddress2></MacAddress2>\n\
+             <WanIPAddress>10.134.20.7</WanIPAddress>\n<ProductFamily>LTE</ProductFamily>\n\
+             <Classify>cpe</Classify>\n<supportmode>LTE|NR</supportmode>\n<workmode>LTE</workmode>\n\
+             <Mccmnc>42004</Mccmnc>\n<uptime>957969</uptime>\n</response>\n"
+        )
+    }
+
+    #[test]
+    fn a_version_with_its_build_in_brackets_is_kept_as_huawei_writes_it() {
+        // The router writes each bracket as a character reference, in either of the two forms.
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/device/information",
+            "XHR",
+            json!({}),
+            "text/xml",
+            &huawei_information(
+                "11.0.2.21&#40;H300SP5C7001&#41;",
+                "WEBUI 11.0.2.21&#x28;W13SP5C7201&#x29;",
+            ),
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(v["router"]["firmware"], json!("11.0.2.21(H300SP5C7001)"));
+        let answer = v["exchanges"][0]["response"].as_str().unwrap();
+        assert!(
+            answer.contains("<SoftwareVersion>11.0.2.21(H300SP5C7001)</SoftwareVersion>"),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("<WebUIVersion>WEBUI 11.0.2.21(W13SP5C7201)</WebUIVersion>"),
+            "{answer}"
+        );
+        // What identifies the unit is still gone.
+        for private in [
+            "ABC1234567890123",
+            "356789012345678",
+            "420041234567890",
+            "A4:B1",
+            "10.134",
+        ] {
+            assert!(!text.contains(private), "{private}");
+        }
     }
 
     #[test]
@@ -2871,17 +2964,55 @@ mod tests {
     }
 
     #[test]
-    fn text_that_arrives_in_pieces_is_hidden() {
+    fn text_is_judged_whole_whatever_it_was_written_in() {
+        // A character reference is read as the character it stands for, and then the whole text
+        // is judged: no piece of it can pass for something it isn't.
         let mut rec = recorder();
         poll(
             &mut rec,
             "1",
             "http://192.168.8.1/api/x",
             "text/xml",
-            "<response><result>a1b2&amp;c3d4&amp;e5f6</result><status>ab<!-- x -->cd</status><band>3</band></response>",
+            "<response><result>a1b2&amp;c3d4&amp;e5f6</result>             <SoftwareVersion>35678901&#50;345678</SoftwareVersion>             <HardwareVersion>A4:B1:C2&#58;D3:E4:F5</HardwareVersion>             <LTEBand>3567890&#x31;2345679</LTEBand>             <wanversion>10.134&#46;22.7</wanversion><band>3</band></response>",
         );
         let (text, v) = built(rec, &opts());
-        for gone in ["a1b2", "c3d4", "e5f6", ">ab", "cd<"] {
+        for gone in [
+            "a1b2",
+            "c3d4",
+            "e5f6",
+            "35678901",
+            "345678",
+            "356789012345678",
+            "A4:B1",
+            "D3:E4",
+            "3567890",
+            "2345679",
+            "10.134",
+            "22.7",
+            "&#",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        assert!(v["exchanges"][0]["response"]
+            .as_str()
+            .unwrap()
+            .contains("<band>3</band>"));
+    }
+
+    #[test]
+    fn text_broken_up_by_anything_else_is_hidden() {
+        // A comment, CDATA, an instruction or a reference nobody can read: nothing says what the
+        // whole would have been.
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/x",
+            "text/xml",
+            "<response><status>ab<!-- x -->cd</status><mode><![CDATA[bridge]]></mode>             <state>idle&nbsp;wait</state><result>up<?x y?>down</result><band>3</band></response>",
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in [">ab", "cd<", "bridge", "idle", "wait", ">up", "down<"] {
             assert!(!text.contains(gone), "{gone} is in the file");
         }
         assert!(v["exchanges"][0]["response"]
