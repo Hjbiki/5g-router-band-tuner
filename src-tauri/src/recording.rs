@@ -31,6 +31,9 @@ pub const EVENT: &str = "capture-status";
 const PREVIEW_BYTES: usize = 256 * 1024;
 const FILE_NAME: &str = "router-band-tuner-recording.json";
 const TITLE_MAX: usize = 80;
+/// How many of the file's readable values the main window is given, and how much of each.
+const READABLE_MAX: usize = 300;
+const READABLE_BYTES: usize = 120;
 /// What the window's Stop item says when the main window gave it no text.
 const STOP_TEXT: &str = "Stop";
 
@@ -168,6 +171,11 @@ pub struct CapturePreview {
     pub limit: Option<Limit>,
     /// What the last check found in the cleaned file. Not empty means nothing can be saved.
     pub problems: Vec<String>,
+    /// The values still readable in the file, as the router's page had them: what a person
+    /// checks instead of reading the file. The first of them when there are very many.
+    pub readable: Vec<String>,
+    /// How many readable values the file has in all.
+    pub readable_total: u32,
 }
 
 /// Why a recording can't start now, if it can't. The app must not be talking to the router
@@ -223,6 +231,17 @@ fn head(text: &str, max: usize) -> &str {
     &text[..end]
 }
 
+/// The readable values for the screen: the first of them, each cut to a line, and their count.
+fn listed(readable: Vec<String>) -> (Vec<String>, u32) {
+    let total = u32::try_from(readable.len()).unwrap_or(u32::MAX);
+    let shown = readable
+        .into_iter()
+        .take(READABLE_MAX)
+        .map(|value| head(&value, READABLE_BYTES).to_string())
+        .collect();
+    (shown, total)
+}
+
 fn emit(app: &AppHandle, cap: &CaptureState) {
     let _ = app.emit(EVENT, cap.status());
 }
@@ -249,15 +268,16 @@ async fn preview(
             include_code,
             limit,
         };
-        capture::build(&exchanges, &opts)
+        capture::build_with_readable(&exchanges, &opts)
     })
     .await
     .map_err(|e| CmdError::Message(e.to_string()))?;
 
-    let (text, problems) = match built {
-        Ok(text) => (Some(text), Vec::new()),
-        Err(found) => (None, found),
+    let (text, readable, problems) = match built {
+        Ok(built) => (Some(built.text), built.readable, Vec::new()),
+        Err(found) => (None, Vec::new(), found),
     };
+    let (readable, readable_total) = listed(readable);
     let shown = text
         .as_deref()
         .map(|t| head(t, PREVIEW_BYTES).to_string())
@@ -275,6 +295,8 @@ async fn preview(
         code_included: include_code,
         limit,
         problems,
+        readable,
+        readable_total,
     })
 }
 
@@ -503,6 +525,21 @@ mod tests {
         assert_eq!(head("abع", 3), "ab");
         assert_eq!(head("عع", 2), "ع");
         assert_eq!(head("", 0), "");
+    }
+
+    #[test]
+    fn the_readable_values_are_shown_whole_up_to_a_limit_and_counted_in_full() {
+        let few = vec!["H122-373".to_string(), "Zain KSA".to_string()];
+        assert_eq!(listed(few.clone()), (few, 2));
+        // A file can keep thousands of distinct values: the screen gets the first of them and
+        // is told how many there are.
+        let many: Vec<String> = (0..READABLE_MAX + 50).map(|n| format!("v{n}")).collect();
+        let (shown, total) = listed(many);
+        assert_eq!(shown.len(), READABLE_MAX);
+        assert_eq!(total as usize, READABLE_MAX + 50);
+        // One long value is cut, never inside a character.
+        let (shown, _) = listed(vec!["ع".repeat(READABLE_BYTES)]);
+        assert!(shown[0].len() <= READABLE_BYTES && shown[0].chars().all(|c| c == 'ع'));
     }
 
     #[test]

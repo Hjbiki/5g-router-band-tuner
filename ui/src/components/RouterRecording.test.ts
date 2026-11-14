@@ -36,6 +36,8 @@ const preview: CapturePreview = {
   codeIncluded: false,
   limit: null,
   problems: [],
+  readable: ['H122-373', 'Zain KSA', 'LTE'],
+  readableTotal: 3,
 }
 
 const button = (key: Parameters<typeof t>[0]) => screen.getByRole('button', { name: t(key) })
@@ -146,6 +148,44 @@ describe('RouterRecording', () => {
     expect(screen.getByText('2 KB')).toBeTruthy()
     expect(button('recording.save')).toBeTruthy()
     expect(screen.queryByText(t('recording.truncated'))).toBeNull()
+  })
+
+  it('lists the few values still readable, which is what a person can actually check', async () => {
+    // Nobody reads a file of hundreds of kilobytes. The list is short, and it comes first.
+    await mounted(running)
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    await fireEvent.click(button('recording.stop'))
+    const list = await screen.findByRole('list', { name: t('recording.readable', { n: '3' }) })
+    expect([...list.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['H122-373', 'Zain KSA', 'LTE'])
+    expect(screen.getByText(t('recording.readable', { n: '3' }))).toBeTruthy()
+    // The list comes before the file's text.
+    const box = screen.getByRole('textbox')
+    expect(list.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText(t('recording.readableNone'))).toBeNull()
+  })
+
+  it('says how many more readable values the file has when the list is cut', async () => {
+    vi.mocked(api.captureStop).mockResolvedValue({ ...preview, readableTotal: 340 })
+    await mounted(running)
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    await fireEvent.click(button('recording.stop'))
+    expect(await screen.findByText(t('recording.readableMore', { n: '337' }))).toBeTruthy()
+    expect(screen.getByText(t('recording.readable', { n: '340' }))).toBeTruthy()
+  })
+
+  it('says so when nothing is readable, and shows a value as text whatever it holds', async () => {
+    vi.mocked(api.captureStop).mockResolvedValue({ ...preview, readable: [], readableTotal: 0 })
+    await mounted(running)
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    await fireEvent.click(button('recording.stop'))
+    expect(await screen.findByText(t('recording.readableNone'))).toBeTruthy()
+    expect(screen.queryByRole('list')).toBeNull()
+    // A router chooses its values: one that looks like markup is shown, never run.
+    const hostile = '<img src=x onerror=alert(1)>'
+    vi.mocked(api.capturePreview).mockResolvedValue({ ...preview, readable: [hostile], readableTotal: 1 })
+    await fireEvent.click(screen.getByRole('checkbox', { name: t('recording.includeCode') }))
+    expect(await screen.findByText(hostile)).toBeTruthy()
+    expect(document.querySelector('img[src="x"]')).toBeNull()
   })
 
   it('says when only the start of a large file is shown', async () => {

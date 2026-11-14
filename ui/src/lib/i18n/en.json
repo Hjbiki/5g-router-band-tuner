@@ -1451,8 +1451,11 @@
       "size": "It stopped taking more: the recording is full.",
       "time": "It stopped taking more after 15 minutes."
     },
-    "reviewTitle": "Check the file before you share it",
-    "reviewBody": "Passwords, names and addresses are removed. Only you know what else is private, so read it first.",
+    "reviewTitle": "Check this before you share the file",
+    "reviewBody": "Passwords, names and addresses are hidden.",
+    "readable": "Besides numbers and field names, only these are still readable ({n}):",
+    "readableNone": "Besides numbers and field names, nothing is still readable.",
+    "readableMore": "And {n} more in the file below.",
     "requests": "{n} requests",
     "truncated": "This is the start of the file. The saved file is complete.",
     "includeCode": "Include the router's script files",

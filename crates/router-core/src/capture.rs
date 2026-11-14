@@ -34,7 +34,9 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use ts_rs::TS;
 
-use crate::diagnostics::{identifier_hits, redact_identifier_tokens, Redactor, Rules};
+use crate::diagnostics::{
+    identifier_hits, redact_identifier_tokens, Redactor, Rules, HIDDEN, LEFT_OUT,
+};
 use crate::probe;
 
 /// Format tag of the saved file.
@@ -842,6 +844,26 @@ fn entry<'a>(
 /// the page asked for things. So the same text is hidden everywhere, instead of the save being
 /// refused because of it.
 pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, Vec<String>> {
+    build_with_readable(exchanges, opts).map(|built| built.text)
+}
+
+/// A cleaned file, and what in it a person can still read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Built {
+    pub text: String,
+    /// Every value the file still shows as the router's page had it, each once, sorted. Not
+    /// what was hidden, not a stand-in, not a short plain number, and not the names of fields or
+    /// the paths. A file is hundreds of kilobytes and nobody reads it before sharing it; this list
+    /// is short enough to read, and it is taken from the finished file, not from what the
+    /// cleaning meant to keep.
+    pub readable: Vec<String>,
+}
+
+/// `build`, with the list of what is still readable in the file.
+pub fn build_with_readable(
+    exchanges: &[Exchange],
+    opts: &BuildOptions<'_>,
+) -> Result<Built, Vec<String>> {
     let mut first = Redactor::with_rules(Rules::Capture);
     for (i, x) in exchanges.iter().enumerate() {
         let _ = entry(&mut first, i + 1, x, false);
@@ -849,12 +871,66 @@ pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, 
     build_knowing(exchanges, opts, &first)
 }
 
+/// What the finished file still shows of the router's own values. `red` wrote the file, so it
+/// knows its stand-ins.
+fn readable(file: &Value, red: &Redactor) -> Vec<String> {
+    fn xml_values(xml: &str, leaf: &mut dyn FnMut(&str)) {
+        use quick_xml::events::Event;
+        let mut reader = quick_xml::Reader::from_str(xml);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Text(t)) => leaf(&String::from_utf8_lossy(&t)),
+                Ok(Event::Start(e) | Event::Empty(e)) => {
+                    for attr in e.attributes().flatten() {
+                        leaf(&String::from_utf8_lossy(&attr.value));
+                    }
+                }
+                Ok(Event::Eof) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
+    fn walk(v: &Value, leaf: &mut dyn FnMut(&str)) {
+        match v {
+            Value::Object(m) => m.values().for_each(|x| walk(x, leaf)),
+            Value::Array(a) => a.iter().for_each(|x| walk(x, leaf)),
+            // A body that is XML is kept as text.
+            Value::String(s) if s.contains('<') => xml_values(s, leaf),
+            Value::String(s) => leaf(s),
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        }
+    }
+    let mut found = BTreeSet::new();
+    let mut leaf = |value: &str| {
+        let value = value.trim();
+        // A reading, a mask or a version in digits says nothing of anybody, and a file has
+        // thousands. A long one could be a phone number, so that is listed.
+        let digits = value.bytes().filter(u8::is_ascii_digit).count();
+        let number = digits < 9
+            && value
+                .chars()
+                .all(|c| c.is_ascii_digit() || "+-.,".contains(c));
+        // The cleaner's own words aren't the router's.
+        let ours = [HIDDEN, LEFT_OUT, "*"].contains(&value) || red.made(value);
+        if !(value.is_empty() || number || ours) {
+            found.insert(value.to_string());
+        }
+    };
+    walk(&file["router"], &mut leaf);
+    for x in file["exchanges"].as_array().into_iter().flatten() {
+        for part in ["query", "request", "response"] {
+            walk(&x[part], &mut leaf);
+        }
+    }
+    found.into_iter().collect()
+}
+
 /// The second pass, and the scan of what it made.
 fn build_knowing(
     exchanges: &[Exchange],
     opts: &BuildOptions<'_>,
     first: &Redactor,
-) -> Result<String, Vec<String>> {
+) -> Result<Built, Vec<String>> {
     // What in an exchange comes from the router's page. The rest of the file is this app's own
     // words ("static", "router", "response"), which a hidden value may well be too.
     const FROM_ROUTER: &[&str] = &[
@@ -917,13 +993,16 @@ fn build_knowing(
     file["router"]["model"] = json!(facts.model);
     file["router"]["hardware"] = json!(facts.hardware);
     file["router"]["firmware"] = json!(facts.firmware);
-    serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])
+    let text = serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])?;
+    Ok(Built {
+        readable: readable(&file, &red),
+        text,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diagnostics::HIDDEN;
 
     const ROUTER: &str = "http://192.168.8.1";
 
@@ -1705,6 +1784,72 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("<SoftwareVersion>11.0.2.21</SoftwareVersion>"));
+    }
+
+    #[test]
+    fn the_readable_list_is_everything_a_person_can_still_read() {
+        // Nobody reads a file of hundreds of kilobytes before sharing it. This list is what they
+        // read instead: every value still written as the router's page had it. Hidden values,
+        // stand-ins and plain numbers are not on it.
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/device/information",
+            "XHR",
+            json!({}),
+            "text/xml",
+            &huawei_information("11.0.2.21&#40;H300SP5C7001&#41;", "WEBUI 11.0.2.1"),
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/system/HostInfo",
+            "application/json",
+            r#"[{"HostName":"Hibi-Laptop","MACAddress":"A4:B1:C2:D3:E4:F6","Frequency":"5GHz","Active":true,"ID":"host-7","Layer2Interface":"SSID2"}]"#,
+        );
+        poll(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/api/net/net-mode?mode=all&scope=mine",
+            "text/xml",
+            "<response><NetworkMode>00</NetworkMode><LTEBand mode=\"auto\" mask=\"7FF\">80005</LTEBand>\
+             <workmode>LTE</workmode><ulfreq>0555123456</ulfreq></response>",
+        );
+        let exchanges = rec.into_exchanges();
+        let built = build_with_readable(&exchanges, &opts()).expect("a clean file");
+        assert_eq!(
+            built.readable,
+            [
+                // A number long enough to be somebody's is listed; `80005` and `00` are not.
+                "0555123456",
+                "11.0.2.21(H300SP5C7001)",
+                "5GHz",
+                "H122-373",
+                "LTE",
+                "WEBUI 11.0.2.1",
+                "WL1H122M",
+                // What a request asked for and an attribute, when their names are kept ones.
+                "all",
+                "auto",
+            ]
+        );
+        // Under a name that isn't kept, a value is a stand-in, and a stand-in isn't listed.
+        assert!(!built.text.contains("7FF") && !built.text.contains("mine"));
+        // It is the same file `build` makes, and everything listed is in it as listed.
+        assert_eq!(built.text, build(&exchanges, &opts()).unwrap());
+        for value in &built.readable {
+            assert!(built.text.contains(value.as_str()), "{value}");
+        }
+        for private in ["Hibi", "A4:B1", "host-7", "SSID2", "356789012345678"] {
+            assert!(!built.text.contains(private), "{private}");
+        }
+        // Nothing the cleaner wrote itself is on the list.
+        assert!(!built
+            .readable
+            .iter()
+            .any(|v| v == HIDDEN || v.starts_with("192.0.2.")));
     }
 
     #[test]

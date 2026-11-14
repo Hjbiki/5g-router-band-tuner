@@ -20,4 +20,13 @@ truncated: boolean, requests: number, codeIncluded: boolean, limit: Limit | null
 /**
  * What the last check found in the cleaned file. Not empty means nothing can be saved.
  */
-problems: Array<string>, };
+problems: Array<string>, 
+/**
+ * The values still readable in the file, as the router's page had them: what a person
+ * checks instead of reading the file. The first of them when there are very many.
+ */
+readable: Array<string>, 
+/**
+ * How many readable values the file has in all.
+ */
+readableTotal: number, };

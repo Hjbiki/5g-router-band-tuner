@@ -23,7 +23,7 @@ pub const FORMAT: &str = "router-band-tuner-diagnostics/1";
 /// How many event-log lines the export keeps.
 pub const EVENT_TAIL: usize = 200;
 /// Stands in for a body that couldn't be parsed, so nothing in it can leak.
-const LEFT_OUT: &str = "(left out: not well-formed XML or JSON)";
+pub(crate) const LEFT_OUT: &str = "(left out: not well-formed XML or JSON)";
 
 /// Tags known to be secret, identifying or address-like (redact-har.mjs `SENSITIVE_TAGS`).
 const SENSITIVE_TAGS: &[&str] = &[
@@ -1064,6 +1064,11 @@ impl Redactor {
             .map(String::as_str)
             .collect();
         held(text, &phrases)
+    }
+
+    /// Whether `value` is one of this redactor's own stand-ins, written in place of something.
+    pub(crate) fn made(&self, value: &str) -> bool {
+        self.generated.contains(value)
     }
 
     /// Whether this exact word was hidden as a value anywhere, for any reason. For a path's

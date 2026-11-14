@@ -381,7 +381,7 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
-                let built = capture::build(
+                let whole = capture::build_with_readable(
                     &exchanges,
                     &BuildOptions {
                         app_version: "harness",
@@ -390,6 +390,9 @@ fn main() {
                         limit,
                     },
                 );
+                // What the review shows a person instead of the whole file.
+                let readable = whole.as_ref().map(|b| b.readable.clone()).unwrap_or_default();
+                let built = whole.map(|b| b.text);
 
                 let mut failed = 0;
                 let mut check = |name: &str, ok: bool, detail: String| {
@@ -544,6 +547,18 @@ fn main() {
                             "the reading is readable",
                             entry("/api/status")["response"]["lte_rsrp"] == "-97",
                             entry("/api/status").to_string(),
+                        );
+                        check(
+                            "the list of readable values has the band command, the model and no secret",
+                            ["800C5", "MOCK-5G", "success"]
+                                .iter()
+                                .all(|v| readable.iter().any(|r| r == v))
+                                && !readable.iter().any(|r| {
+                                    ["hunter2", "Mock-Home", "356789012345678", "(hidden)", "(left out"]
+                                        .iter()
+                                        .any(|s| r.contains(s))
+                                }),
+                            format!("{readable:?}"),
                         );
                         check(
                             "the model was found",

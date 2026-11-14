@@ -187,13 +187,27 @@
       <p class="err" role="alert">{t('recording.blocked', { what: preview.problems.join(', ') })}</p>
     {:else if preview}
       <p class="k">{t('recording.reviewBody')}</p>
+      <!-- What a person can actually check: the file is far too long to read. Text only. -->
+      {#if preview.readable.length}
+        <p id="recording-readable">{t('recording.readable', { n: count(preview.readableTotal) })}</p>
+        <ul class="words" aria-labelledby="recording-readable">
+          {#each preview.readable as value, i (i)}<li><bdi dir="ltr">{value}</bdi></li>{/each}
+        </ul>
+        {#if preview.readableTotal > preview.readable.length}
+          <p class="k">
+            {t('recording.readableMore', { n: count(preview.readableTotal - preview.readable.length) })}
+          </p>
+        {/if}
+      {:else}
+        <p>{t('recording.readableNone')}</p>
+      {/if}
       <p class="k">
         <span>{t('recording.requests', { n: count(preview.requests) })}</span>
         <span class="sep" aria-hidden="true">·</span>
         <bdi dir="ltr">{size(preview.bytes)}</bdi>
       </p>
       {#if preview.limit}<p class="k">{t(`recording.limit.${preview.limit}`)}</p>{/if}
-      <textarea dir="ltr" readonly rows="12" aria-labelledby="recording-review" value={preview.text}></textarea>
+      <textarea dir="ltr" readonly rows="8" aria-labelledby="recording-review" value={preview.text}></textarea>
       {#if preview.truncated}<p class="k">{t('recording.truncated')}</p>{/if}
       <label class="code">
         <input type="checkbox" bind:checked={includeCode} disabled={busy} onchange={rebuild} />
@@ -229,6 +243,26 @@
   }
   p {
     margin: 0;
+  }
+  .words {
+    display: flex;
+    /* The points above are a column; these sit side by side and wrap. */
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    max-block-size: 220px;
+    overflow-y: auto;
+  }
+  .words li {
+    padding: 2px 8px;
+    border: 1px solid var(--field-border);
+    border-radius: 6px;
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: var(--fs-small, 13px);
+    overflow-wrap: anywhere;
   }
   .k {
     color: var(--muted);
