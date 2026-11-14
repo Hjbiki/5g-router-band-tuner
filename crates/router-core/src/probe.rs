@@ -151,6 +151,19 @@ pub(crate) fn model_field(text: &str) -> Option<String> {
     )
 }
 
+/// A model by a name that can only mean this device's model. `devicename` isn't one: a list of
+/// the devices on the network uses it for a phone or a laptop.
+pub(crate) fn strict_model_field(text: &str) -> Option<String> {
+    static T: OnceLock<Regex> = OnceLock::new();
+    static A: OnceLock<Regex> = OnceLock::new();
+    field(
+        text,
+        &T,
+        "modelname|model_name|devicemodel|device_model|productname|product_name|productclass|product_model|model",
+        &A,
+    )
+}
+
 pub(crate) fn hardware_field(text: &str) -> Option<String> {
     static T: OnceLock<Regex> = OnceLock::new();
     static A: OnceLock<Regex> = OnceLock::new();

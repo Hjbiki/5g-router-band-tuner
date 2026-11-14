@@ -5,27 +5,35 @@
 //! protocol's JSON, nothing else) and keeps only what the page asked the router itself. `build`
 //! turns that into the file a person can attach to an issue.
 //!
-//! The file is meant to be public, so this is the part that has to be right:
+//! The file is meant to be public, and the router's page chooses every name and value in it, so
+//! this is the part that has to be right:
 //!
-//! - A header's value is never stored, only its name. So no cookie, authorization or token header
-//!   can be in the file, whatever a router calls it.
+//! - A header's value is never stored, only its name. The one exception is the media type of
+//!   `Content-Type`, kept when it has a media type's shape.
 //! - A request to any other host is never stored.
 //! - A login exchange keeps its names and hides every value, the length too
 //!   (`Rules::ShapeOnly`). A password's hash can be as sensitive as the password.
 //! - Every other body is parsed and goes through `Rules::Capture`: a value stays only under a name
-//!   known to be technical. A body that is neither XML, JSON nor a form is left out.
-//! - Pages and scripts are the router maker's code and can hold anything: by default only their
-//!   path, status and the API paths in them are kept.
+//!   known to be technical, and only when it reads like a reading or a state. A name that doesn't
+//!   read like a field's name is treated as data. A body that is neither XML, JSON nor a form is
+//!   left out.
+//! - A page's markup is never kept: routers write live values into it. A script is the router
+//!   maker's code: left out unless the user asks, and then only a `.js` file that isn't part of a
+//!   login and holds nothing that was hidden elsewhere.
 //! - The finished file is scanned, and a hit means nothing is written.
+//!
+//! What this can't promise: a short private word under a technical name (`"result": "hibi"`)
+//! reads exactly like a state. The person sees the file before saving it.
 
 use std::collections::{BTreeSet, HashMap};
+use std::fmt;
 
 use base64::Engine as _;
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
-use crate::diagnostics::{redact_identifier_tokens, Redactor, Rules};
+use crate::diagnostics::{identifier_hits, redact_identifier_tokens, Redactor, Rules};
 use crate::probe;
 
 /// Format tag of the saved file.
@@ -33,16 +41,22 @@ pub const FORMAT: &str = "router-band-tuner-capture/1";
 pub const MAX_EXCHANGES: usize = 500;
 pub const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+/// A longer address than this isn't kept: only that there was a request.
+const MAX_URL_BYTES: usize = 8 * 1024;
+const MAX_HEADERS: usize = 64;
+const MAX_HEADER_NAME: usize = 64;
 
 const NOTE_STATIC: &str = "a static file: no body kept";
 const NOTE_REDIRECT: &str = "a redirect: its own body isn't available";
 const NOTE_UNFINISHED: &str = "the page left before this answer finished";
 const NOTE_MISSING: &str = "the body wasn't available";
 const NOTE_TOO_LARGE: &str = "larger than 2 MiB: left out";
+const NOTE_PAGE: &str = "a page: its markup is never kept";
 const NOTE_CODE: &str = "the router maker's code: left out";
+const NOTE_CODE_HELD: &str = "left out: it holds a value that was hidden elsewhere";
 const OTHER_HOST: &str = "(another address)";
+const TOO_LONG: &str = "(too long)";
 const MAX_API_PATHS: usize = 60;
-const MAX_TITLES: usize = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,8 +98,8 @@ pub enum Ask {
 }
 
 /// One request the page made to the router, and the router's answer, as recorded. Nothing here is
-/// cleaned yet except that header values were never taken.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// cleaned yet, except that header values were never taken.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Exchange {
     pub method: String,
     pub path: String,
@@ -95,6 +109,8 @@ pub struct Exchange {
     pub request_headers: Vec<String>,
     pub request_type: Option<String>,
     pub request_body: Option<String>,
+    /// The page sent a body, and it never reached the recorder.
+    pub request_body_missing: bool,
     pub status: Option<u16>,
     pub content_type: Option<String>,
     /// Names only.
@@ -105,23 +121,67 @@ pub struct Exchange {
     pub redirect_to: Option<String>,
 }
 
+/// What was recorded holds passwords until `build` cleans it, so it never prints its contents.
+impl fmt::Debug for Exchange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Exchange")
+            .field("method", &self.method)
+            .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("status", &self.status)
+            .field("query_fields", &self.query.len())
+            .field("sent_bytes", &self.request_body.as_ref().map(String::len))
+            .field("answer_bytes", &self.body.as_ref().map(String::len))
+            .field("note", &self.note)
+            .finish()
+    }
+}
+
 fn header_names(headers: &Value) -> Vec<String> {
     let mut names: Vec<String> = headers
         .as_object()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| {
+            m.keys()
+                .filter(|k| k.len() <= MAX_HEADER_NAME)
+                .take(MAX_HEADERS)
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     names.sort_by_key(|n| n.to_ascii_lowercase());
     names
 }
 
-/// The media type of a `Content-Type` header, without its parameters.
-fn media_type(headers: &Value) -> Option<String> {
+/// A media type like `text/xml`, lowercased, without its parameters. Anything of another shape
+/// is page-chosen text, and isn't kept.
+fn media_type(raw: &str) -> Option<String> {
+    let kind = raw.split(';').next()?.trim().to_ascii_lowercase();
+    let part = |s: &str| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".+-".contains(c))
+    };
+    let (main, sub) = kind.split_once('/')?;
+    (kind.len() <= 64 && part(main) && part(sub)).then_some(kind)
+}
+
+fn content_type(headers: &Value) -> Option<String> {
     let (_, v) = headers
         .as_object()?
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))?;
-    let kind = v.as_str()?.split(';').next()?.trim().to_ascii_lowercase();
-    (!kind.is_empty()).then_some(kind)
+    media_type(v.as_str()?)
+}
+
+/// The usual methods as they are; anything else is page-chosen text.
+fn method(raw: &str) -> String {
+    const USUAL: &[&str] = &["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"];
+    let upper = raw.to_ascii_uppercase();
+    if USUAL.contains(&upper.as_str()) {
+        upper
+    } else {
+        "OTHER".to_string()
+    }
 }
 
 /// Keeps what the router's own page asked the router. Feed it every `Network.*` event.
@@ -130,24 +190,32 @@ pub struct Recorder {
     list: Vec<Exchange>,
     /// A request id's newest exchange. A redirect keeps the id and starts a new exchange.
     open: HashMap<String, usize>,
+    /// The exchange a sent body was asked for: a redirect may move the id on before it arrives.
+    awaiting_sent: HashMap<String, usize>,
     bytes: usize,
     limit: Option<Limit>,
 }
 
 impl Recorder {
-    pub fn new(router: &Url) -> Self {
-        Self {
+    /// `None` for an address that isn't a web address: its origin would match anything opaque.
+    pub fn new(router: &Url) -> Option<Self> {
+        if !matches!(router.scheme(), "http" | "https") || router.host_str().is_none() {
+            return None;
+        }
+        Some(Self {
             origin: router.origin().ascii_serialization(),
             list: Vec::new(),
             open: HashMap::new(),
+            awaiting_sent: HashMap::new(),
             bytes: 0,
             limit: None,
-        }
+        })
     }
 
     fn ours(&self, url: &str) -> Option<Url> {
         let url = Url::parse(url).ok()?;
-        (url.origin().ascii_serialization() == self.origin).then_some(url)
+        let web = matches!(url.scheme(), "http" | "https");
+        (web && url.origin().ascii_serialization() == self.origin).then_some(url)
     }
 
     /// One `Network.*` event, as the JSON the browser gave. Returns what to ask the browser for.
@@ -162,10 +230,7 @@ impl Recorder {
                 x.status = response["status"]
                     .as_u64()
                     .and_then(|s| u16::try_from(s).ok());
-                x.content_type = response["mimeType"]
-                    .as_str()
-                    .filter(|m| !m.is_empty())
-                    .map(str::to_string);
+                x.content_type = response["mimeType"].as_str().and_then(media_type);
                 x.response_headers = header_names(&response["headers"]);
                 None
             }
@@ -217,17 +282,24 @@ impl Recorder {
             self.limit = Some(Limit::Requests);
             return None;
         }
-        let mut x = Exchange {
-            method: request["method"].as_str().unwrap_or("GET").to_string(),
-            path: url.path().to_string(),
-            query: url
+        let (path, query) = if to.len() > MAX_URL_BYTES {
+            (TOO_LONG.to_string(), Vec::new())
+        } else {
+            let query = url
                 .query_pairs()
                 .map(|(k, v)| (k.into_owned(), v.into_owned()))
-                .collect(),
+                .collect();
+            (url.path().to_string(), query)
+        };
+        let mut x = Exchange {
+            method: method(request["method"].as_str().unwrap_or("GET")),
+            path,
+            query,
             kind: Kind::from_cdp(v["type"].as_str().unwrap_or("")),
             request_headers: header_names(&request["headers"]),
-            request_type: media_type(&request["headers"]),
+            request_type: content_type(&request["headers"]),
             request_body: None,
+            request_body_missing: false,
             status: None,
             content_type: None,
             response_headers: Vec::new(),
@@ -235,10 +307,23 @@ impl Recorder {
             note: None,
             redirect_to: None,
         };
+        // The address and the names count against the size limit too.
+        let held = x.path.len()
+            + x.query
+                .iter()
+                .map(|(k, v)| k.len() + v.len())
+                .sum::<usize>()
+            + x.request_headers.iter().map(String::len).sum::<usize>();
+        if !self.charge(held) {
+            return None;
+        }
         let mut ask = None;
         if let Some(body) = request["postData"].as_str() {
             x.request_body = self.take(body.to_string());
+            x.request_body_missing = x.request_body.is_none();
         } else if request["hasPostData"].as_bool() == Some(true) {
+            x.request_body_missing = true;
+            self.awaiting_sent.insert(id.clone(), self.list.len());
             ask = Some(Ask::RequestBody(id.clone()));
         }
         self.open.insert(id, self.list.len());
@@ -246,36 +331,44 @@ impl Recorder {
         ask
     }
 
+    /// Counts bytes against the whole recording's limit. `false` when it is full.
+    fn charge(&mut self, len: usize) -> bool {
+        if self.limit.is_some() {
+            return false;
+        }
+        if self.bytes + len > MAX_TOTAL_BYTES {
+            self.limit = Some(Limit::Size);
+            return false;
+        }
+        self.bytes += len;
+        true
+    }
+
     /// Counts a body against the limits. `None` when it is too large or the recording is full.
     fn take(&mut self, text: String) -> Option<String> {
-        if text.len() > MAX_BODY_BYTES || self.limit.is_some() {
-            return None;
-        }
-        if self.bytes + text.len() > MAX_TOTAL_BYTES {
-            self.limit = Some(Limit::Size);
-            return None;
-        }
-        self.bytes += text.len();
-        Some(text)
+        (text.len() <= MAX_BODY_BYTES && self.charge(text.len())).then_some(text)
     }
 
     /// The browser's answer to `Network.getResponseBody` for this request.
     pub fn response_body(&mut self, id: &str, json: &str) {
         let Some(&i) = self.open.get(id) else { return };
-        let text = serde_json::from_str::<Value>(json).ok().and_then(|v| {
-            let body = v["body"].as_str()?;
-            if v["base64Encoded"].as_bool() == Some(true) {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(body)
-                    .ok()?;
-                // Routers send gzip without saying so (the H122 does), and the browser hands the
-                // raw bytes over.
-                Some(probe::decode(&bytes))
-            } else {
-                Some(body.to_string())
-            }
-        });
+        let (text, large) = match serde_json::from_str::<Value>(json) {
+            Ok(v) => match v["body"].as_str() {
+                // Checked before decoding: base64 is a third longer than what it holds.
+                Some(body) if body.len() > MAX_BODY_BYTES / 3 * 4 + 4 => (None, true),
+                Some(body) if v["base64Encoded"].as_bool() == Some(true) => {
+                    let bytes = base64::engine::general_purpose::STANDARD.decode(body).ok();
+                    // Routers send gzip without saying so (the H122 does), and the browser hands
+                    // the raw bytes over.
+                    (bytes.map(|b| probe::decode(&b)), false)
+                }
+                Some(body) => (Some(body.to_string()), false),
+                None => (None, false),
+            },
+            Err(_) => (None, false),
+        };
         let (body, note) = match text {
+            None if large => (None, NOTE_TOO_LARGE),
             None => (None, NOTE_MISSING),
             Some(t) if t.len() > MAX_BODY_BYTES => (None, NOTE_TOO_LARGE),
             Some(t) => (self.take(t), NOTE_MISSING),
@@ -288,7 +381,9 @@ impl Recorder {
 
     /// The browser's answer to `Network.getRequestPostData` for this request.
     pub fn request_body(&mut self, id: &str, json: &str) {
-        let Some(&i) = self.open.get(id) else { return };
+        let Some(i) = self.awaiting_sent.remove(id) else {
+            return;
+        };
         let Some(text) = serde_json::from_str::<Value>(json)
             .ok()
             .and_then(|v| v["postData"].as_str().map(str::to_string))
@@ -297,6 +392,7 @@ impl Recorder {
         };
         let kept = self.take(text);
         if let Some(x) = self.list.get_mut(i) {
+            x.request_body_missing = kept.is_none();
             x.request_body = kept;
         }
     }
@@ -326,13 +422,14 @@ impl Recorder {
 pub struct BuildOptions<'a> {
     pub app_version: &'a str,
     pub generated_at_ms: u64,
-    /// The user's choice: pages and scripts are the router maker's code.
+    /// The user's choice: scripts are the router maker's code.
     pub include_code: bool,
     pub limit: Option<Limit>,
 }
 
 /// A login exchange, by its path, its query or what it sends. Judged widely on purpose: a wrong
-/// yes only hides values, a wrong no could publish a password's hash.
+/// yes only hides values, a wrong no could publish a password's hash. A sent body that never
+/// arrived can't be judged, so it counts as one.
 fn login_shaped(x: &Exchange) -> bool {
     const IN_PATH: &[&str] = &[
         "login",
@@ -366,9 +463,18 @@ fn login_shaped(x: &Exchange) -> bool {
         "salt",
         "challenge",
         "credential",
+        "auth",
+        "hash",
+        "digest",
+        "secret",
+        "otp",
+        "token",
     ];
     // A field named just `pw`, in a form, JSON or XML.
     const PW_FIELD: &[&str] = &["pw=", "\"pw\"", "<pw>"];
+    if x.request_body_missing {
+        return true;
+    }
     let path = probe::fully_decoded(&x.path).to_ascii_lowercase();
     if IN_PATH.iter().any(|w| path.contains(w)) {
         return true;
@@ -384,14 +490,33 @@ fn login_shaped(x: &Exchange) -> bool {
     IN_BODY.iter().chain(PW_FIELD).any(|w| sent.contains(w))
 }
 
-/// `a=1&b=2`, by its declared type or by its look.
+/// `a=1&b=2`, by its declared type or by its look. XML and JSON are read as what they are
+/// whatever the type says (jQuery calls everything a form), and every key must read like a
+/// form's field: a key is copied to the file as a name.
 fn form_fields(body: &str, content_type: Option<&str>) -> Option<Map<String, Value>> {
     let text = body.trim();
+    if text.is_empty() || text.starts_with(['{', '[', '<']) {
+        return None;
+    }
     let declared = content_type.is_some_and(|c| c.contains("x-www-form-urlencoded"));
-    let looks = !text.starts_with(['{', '[', '<'])
-        && !text.contains(char::is_whitespace)
-        && text.split('&').all(|pair| pair.contains('='));
-    if text.is_empty() || !(declared || looks) {
+    let looks =
+        !text.contains(char::is_whitespace) && text.split('&').all(|pair| pair.contains('='));
+    // Base64 with its padding reads like one pair too.
+    let base64 = text.ends_with('=')
+        && text
+            .trim_end_matches('=')
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/');
+    let field = |key: &str| {
+        (1..=64).contains(&key.len())
+            && key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.-[]".contains(c))
+    };
+    let keys_fit = text
+        .split('&')
+        .all(|pair| field(pair.split('=').next().unwrap_or("")));
+    if !(declared || looks) || base64 || !keys_fit {
         return None;
     }
     // The URL parser undoes the percent-encoding the same way a server would.
@@ -403,9 +528,30 @@ fn form_fields(body: &str, content_type: Option<&str>) -> Option<Map<String, Val
     )
 }
 
-/// A name the file shows as it is (a header's, a path's): still with no identifier inside it.
+/// A name the file shows as it is (a header's): still with no identifier inside it.
 fn name_text(s: &str) -> String {
     redact_identifier_tokens(s).0
+}
+
+/// A path as the file shows it: no session, no random token, and no folder named in capitals
+/// only, which is how some routers put the session in the path.
+fn shown_path(path: &str) -> String {
+    let cleaned = probe::clean_path(path);
+    let segment = |s: &str| {
+        let folder = s.len() >= 12 && s.chars().all(|c| c.is_ascii_uppercase());
+        if folder {
+            "*".to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    name_text(
+        &cleaned
+            .split('/')
+            .map(segment)
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }
 
 /// What the recording says the router is. Joined to the file after the scan, by the label rule,
@@ -416,7 +562,6 @@ struct Facts {
     model: Option<String>,
     hardware: Option<String>,
     firmware: Option<String>,
-    titles: Vec<String>,
 }
 
 impl Facts {
@@ -427,37 +572,41 @@ impl Facts {
         if self.vendor.is_none() {
             self.vendor = probe::vendor_in(text);
         }
-        if matches!(x.kind, Kind::Page) {
-            if let Some(t) = probe::title_of(text) {
-                let plain = t.is_ascii() && !t.contains('@');
-                if plain && self.titles.len() < MAX_TITLES && !self.titles.contains(&t) {
-                    self.titles.push(t);
-                }
-            }
-        }
         if x.kind == Kind::Script {
             return;
         }
-        let hardware = probe::hardware_field(text);
-        let firmware = probe::firmware_field(text);
-        // A list of the devices on the network has "device name" fields too. A model is believed
-        // only beside a version, or when it is shaped like a router's model name.
-        if let Some(model) = probe::model_field(text) {
-            let described = hardware.is_some() || firmware.is_some();
-            if self.model.is_none() && (described || probe::model_in_text(&model).is_some()) {
-                self.model = Some(model);
-            }
+        if self.model.is_none() {
+            // A list of the devices on the network has "device name" fields too, so that name
+            // counts only when its value is shaped like a router's model.
+            let loose = probe::model_field(text).filter(|m| probe::model_in_text(m).is_some());
+            self.model = probe::strict_model_field(text).or(loose);
         }
         if self.hardware.is_none() {
-            self.hardware = hardware;
+            self.hardware = probe::hardware_field(text);
         }
         if self.firmware.is_none() {
-            self.firmware = firmware;
+            self.firmware = probe::firmware_field(text);
         }
+    }
+
+    /// A model or a version: a plain label, and nothing the scan would call an identifier except
+    /// that a version reads like an IPv4 address.
+    fn label(value: &Option<String>) -> Option<String> {
+        value
+            .as_deref()
+            .filter(|v| probe::is_plain_label(v))
+            .filter(|v| identifier_hits(v).iter().all(|hit| hit.contains("IPv4")))
+            .map(str::to_string)
     }
 }
 
-fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Value {
+/// One exchange for the file, and its script's text when that may still be included.
+fn entry<'a>(
+    red: &mut Redactor,
+    n: usize,
+    x: &'a Exchange,
+    include_code: bool,
+) -> (Value, Option<&'a str>) {
     let label = format!("x{n}");
     let login = login_shaped(x);
     red.set_rules(if login {
@@ -468,8 +617,8 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
 
     let mut out = Map::new();
     out.insert("n".into(), json!(n));
-    out.insert("method".into(), json!(name_text(&x.method)));
-    out.insert("path".into(), json!(name_text(&probe::clean_path(&x.path))));
+    out.insert("method".into(), json!(x.method));
+    out.insert("path".into(), json!(shown_path(&x.path)));
     out.insert("kind".into(), json!(x.kind));
     if login {
         out.insert("login".into(), json!(true));
@@ -478,7 +627,7 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
         let fields: Map<String, Value> = x
             .query
             .iter()
-            .map(|(k, v)| (name_text(k), Value::String(v.clone())))
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
             .collect();
         out.insert(
             "query".into(),
@@ -488,7 +637,7 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
     let names = |list: &[String]| -> Vec<String> { list.iter().map(|h| name_text(h)).collect() };
     out.insert("requestHeaders".into(), json!(names(&x.request_headers)));
     if let Some(kind) = &x.request_type {
-        out.insert("requestType".into(), json!(name_text(kind)));
+        out.insert("requestType".into(), json!(kind));
     }
     if let Some(body) = &x.request_body {
         let at = format!("{label}.request");
@@ -500,17 +649,15 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
     }
     out.insert("status".into(), json!(x.status));
     if let Some(kind) = &x.content_type {
-        out.insert("type".into(), json!(name_text(kind)));
+        out.insert("type".into(), json!(kind));
     }
     out.insert("responseHeaders".into(), json!(names(&x.response_headers)));
     if let Some(to) = &x.redirect_to {
-        out.insert(
-            "redirectTo".into(),
-            json!(name_text(&probe::clean_path(to))),
-        );
+        out.insert("redirectTo".into(), json!(shown_path(to)));
     }
 
     let mut note = x.note;
+    let mut code = None;
     match (x.kind, x.body.as_deref()) {
         (Kind::Api, Some(body)) => {
             out.insert(
@@ -524,13 +671,17 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
             let paths: Vec<String> = paths
                 .iter()
                 .take(MAX_API_PATHS)
-                .map(|p| name_text(p))
+                .map(|p| shown_path(p))
                 .collect();
             out.insert("apiPaths".into(), json!(paths));
-            if include_code {
-                out.insert("text".into(), json!(redact_identifier_tokens(text).0));
+            let script = x.kind == Kind::Script && x.path.to_ascii_lowercase().ends_with(".js");
+            note = Some(if x.kind == Kind::Page {
+                NOTE_PAGE
             } else {
-                note = Some(NOTE_CODE);
+                NOTE_CODE
+            });
+            if include_code && script && !login {
+                code = Some(text);
             }
         }
         _ => {}
@@ -539,7 +690,7 @@ fn entry(red: &mut Redactor, n: usize, x: &Exchange, include_code: bool) -> Valu
         out.insert("note".into(), json!(note));
     }
     red.set_rules(Rules::Capture);
-    Value::Object(out)
+    (Value::Object(out), code)
 }
 
 /// The cleaned file. `Err` lists what the last scan found in it: nothing may be written then.
@@ -547,18 +698,31 @@ pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, 
     let mut red = Redactor::with_rules(Rules::Capture);
     let mut facts = Facts::default();
     let mut list = Vec::with_capacity(exchanges.len());
+    let mut code = Vec::new();
     for (i, x) in exchanges.iter().enumerate() {
         facts.read(x);
-        list.push(entry(&mut red, i + 1, x, opts.include_code));
+        let (value, text) = entry(&mut red, i + 1, x, opts.include_code);
+        list.push(value);
+        if let Some(text) = text {
+            code.push((i, text));
+        }
     }
-    let titles: Vec<String> = facts.titles.iter().map(|t| name_text(t)).collect();
+    // Only now is everything that was hidden known: a script holding any of it stays out.
+    for (i, text) in code {
+        if red.holds_hidden(text) {
+            list[i]["note"] = json!(NOTE_CODE_HELD);
+        } else if let Some(x) = list[i].as_object_mut() {
+            x.remove("note");
+            x.insert("text".into(), json!(redact_identifier_tokens(text).0));
+        }
+    }
     let mut file = json!({
         "format": FORMAT,
         "appVersion": opts.app_version,
         "generatedAtMs": opts.generated_at_ms,
         "codeIncluded": opts.include_code,
         "limitHit": opts.limit,
-        "router": { "vendor": facts.vendor, "titles": titles },
+        "router": { "vendor": facts.vendor },
         "exchanges": list,
     });
     let text = serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])?;
@@ -567,14 +731,9 @@ pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, 
         return Err(leaks);
     }
     // Versions look like IP addresses, so these join after the scan, by their own rule.
-    let label = |s: &Option<String>| {
-        s.as_deref()
-            .filter(|v| probe::is_plain_label(v))
-            .map(str::to_string)
-    };
-    file["router"]["model"] = json!(label(&facts.model));
-    file["router"]["hardware"] = json!(label(&facts.hardware));
-    file["router"]["firmware"] = json!(label(&facts.firmware));
+    file["router"]["model"] = json!(Facts::label(&facts.model));
+    file["router"]["hardware"] = json!(Facts::label(&facts.hardware));
+    file["router"]["firmware"] = json!(Facts::label(&facts.firmware));
     serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])
 }
 
@@ -586,7 +745,7 @@ mod tests {
     const ROUTER: &str = "http://192.168.8.1";
 
     fn recorder() -> Recorder {
-        Recorder::new(&Url::parse(ROUTER).unwrap())
+        Recorder::new(&Url::parse(ROUTER).unwrap()).expect("a web address")
     }
 
     /// A request event. `extra` is merged into the event (for `redirectResponse` and the like).
@@ -975,7 +1134,8 @@ mod tests {
             &json!({ "body": huge, "base64Encoded": false }).to_string(),
         );
         assert_eq!(rec.limit(), None);
-        let chunk = "b".repeat(MAX_BODY_BYTES);
+        // A little under the largest body, because the addresses count as well.
+        let chunk = "b".repeat(MAX_BODY_BYTES - 1024);
         for i in 0..11 {
             let id = format!("c{i}");
             sent(
@@ -1142,12 +1302,10 @@ mod tests {
         assert_eq!(body["network_type"], json!("5G NSA"));
         assert_eq!(body["lte_band_mask"], json!("800C5"));
         assert_eq!(body["operator_name"], json!("Zain KSA"));
-        assert_eq!(body["hosts"][0]["InterfaceType"], json!("Wireless"));
-        // A hidden value keeps its name and its shape, so the structure can still be read.
-        assert_eq!(
-            body["hosts"][0]["DeviceName"].as_str().unwrap().len(),
-            "Hibi-iPhone 12".len()
-        );
+        // Under a list of people's devices every value is hidden, and the names still show the
+        // structure.
+        assert_eq!(body["hosts"][0]["DeviceName"], json!(HIDDEN));
+        assert_eq!(body["hosts"][0]["InterfaceType"], json!(HIDDEN));
         assert!(body["sms"][0].get("Content").is_some());
     }
 
@@ -1167,6 +1325,7 @@ mod tests {
                 "mode": "someone@example.com",
                 "state": "y".repeat(201),
                 "result": "seen at 10.9.8.7 by 356789012345678",
+                "signal_note": "seen 10.9.8.7 356789012345678",
                 "signal_level": 356789012345678u64,
                 "band": 3,
             })
@@ -1182,9 +1341,11 @@ mod tests {
             assert!(!text.contains(gone), "{gone} is in the file");
         }
         let body = &v["exchanges"][0]["response"];
+        // A state's name keeps one word of a state, never a sentence.
+        assert_ne!(body["result"], json!("seen at 10.9.8.7 by 356789012345678"));
         assert_eq!(
-            body["result"],
-            json!("seen at [redacted-ipv4] by [redacted-number]")
+            body["signal_note"],
+            json!("seen [redacted-ipv4] [redacted-number]")
         );
         assert_eq!(body["band"], json!(3));
         assert!(!text.contains(&"y".repeat(201)));
@@ -1295,11 +1456,12 @@ mod tests {
         assert_eq!(x[1]["apiPaths"], json!(["/goform/goform_get_cmd_process"]));
         assert_eq!(
             (&x[0]["note"], &x[1]["note"]),
-            (&json!(NOTE_CODE), &json!(NOTE_CODE))
+            (&json!(NOTE_PAGE), &json!(NOTE_CODE))
         );
         assert!(x[0].get("text").is_none() && x[1].get("text").is_none());
         assert!(!text.contains("function load") && !text.contains("var mac"));
-        assert_eq!(v["router"]["titles"], json!(["5G CPE"]));
+        // A page's title can be the router's host name, so it isn't kept either.
+        assert!(!text.contains("5G CPE"));
 
         let with_code = BuildOptions {
             include_code: true,
@@ -1308,17 +1470,21 @@ mod tests {
         let (text, v) = built(record(), &with_code);
         let x = &v["exchanges"];
         assert_eq!(v["codeIncluded"], json!(true));
-        assert!(x[1]["text"]
-            .as_str()
-            .unwrap()
-            .starts_with("function load(){"));
-        assert!(x[0].get("note").is_none());
+        // The script comes with its identifier replaced; the page's markup never comes.
+        assert_eq!(
+            x[1]["text"],
+            json!("function load(){ return ajax('/goform/goform_get_cmd_process'); } // built for [redacted-number]")
+        );
+        assert!(x[1].get("note").is_none());
+        assert_eq!(x[0]["note"], json!(NOTE_PAGE));
+        assert!(x[0].get("text").is_none());
         assert!(!text.contains("AA:BB:CC:DD:EE:FF") && !text.contains("356789012345678"));
     }
 
     #[test]
     fn the_last_scan_refuses_a_file_that_still_holds_a_secret() {
-        // The Wi-Fi name is hidden where it is named, and the same text sits in the page's code.
+        // The Wi-Fi name is hidden where it is named. The same text under a state's name reads
+        // like a state, so only the scan of the finished file can see that it is still there.
         let mut rec = recorder();
         exchange(
             &mut rec,
@@ -1328,26 +1494,10 @@ mod tests {
             "Fetch",
             json!({}),
             "application/json",
-            r#"{"WifiSsid":"Hibi-Home-Net"}"#,
+            r#"{"WifiSsid":"hibi_home_net","ppp_status":"hibi_home_net"}"#,
         );
-        exchange(
-            &mut rec,
-            "2",
-            "GET",
-            "http://192.168.8.1/js/boot.js",
-            "Script",
-            json!({}),
-            "application/javascript",
-            "var current = 'Hibi-Home-Net';",
-        );
-        let list = rec.into_exchanges();
-        assert!(build(&list, &opts()).is_ok());
-        let with_code = BuildOptions {
-            include_code: true,
-            ..opts()
-        };
-        let found = build(&list, &with_code).unwrap_err();
-        assert!(!found.is_empty());
+        let found = build(&rec.into_exchanges(), &opts()).unwrap_err();
+        assert_eq!(found, ["an original identifier is still present"]);
     }
 
     #[test]
@@ -1432,5 +1582,629 @@ mod tests {
         assert_eq!(v["limitHit"], json!("time"));
         assert_eq!(v["exchanges"][0]["n"], json!(1));
         assert_eq!(v["exchanges"][0]["kind"], json!("api"));
+    }
+
+    // ---- Found by the independent review of 2026-11-14 ----
+
+    /// One answered API request whose sent body is declared a form.
+    fn form_post(rec: &mut Recorder, id: &str, url: &str, body: &str) {
+        let request = json!({ "postData": body, "headers": { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8" } });
+        exchange(
+            rec,
+            id,
+            "POST",
+            url,
+            "XHR",
+            request,
+            "application/json",
+            r#"{"result":"0"}"#,
+        );
+    }
+
+    #[test]
+    fn a_body_declared_a_form_that_is_not_one_never_becomes_a_name() {
+        let mut rec = recorder();
+        // jQuery's default type on a JSON login, a base64 blob, and XML with an entity in it.
+        form_post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/login",
+            r#"{"username":"admin","password":"5f4dcc3b5aa765d61d8327deb882cf99"}"#,
+        );
+        form_post(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/set",
+            "dXNlcjpodW50ZXIyLXNlY3JldA==",
+        );
+        form_post(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/api/wlan",
+            "<request><WifiSsid>Hibi &amp; Home</WifiSsid><WifiWpapsk>hunter22-wifi</WifiWpapsk></request>",
+        );
+        form_post(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/api/misc",
+            "Hibi+Laptop=1&band=3",
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in [
+            "5f4dcc3b5aa765d61d8327deb882cf99",
+            "dXNlcjpodW50ZXIy",
+            "hunter22-wifi",
+            "Hibi",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        assert_eq!(v["exchanges"][0]["request"]["password"], json!(HIDDEN));
+    }
+
+    #[test]
+    fn a_name_that_is_really_data_is_not_copied() {
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/all?Anad-PC=1&band=3",
+            "XHR",
+            json!({}),
+            "application/json",
+            r#"{"sms":{"966500000000":[{"status":"1"}]},
+                "clients":{"Anad-PC":{"band":"5"},"AA:BB:CC:DD:EE:FF":{"band":"2"}},
+                "0a1b2c3d4e5f":"x","lte_rsrp":"-90"}"#,
+        );
+        exchange(
+            &mut rec,
+            "2",
+            "GET",
+            "http://192.168.8.1/api/xml",
+            "XHR",
+            json!({}),
+            "text/xml",
+            r#"<response><Anad-PC Hibi-Phone="1"><band>3</band></Anad-PC><rsrp>-91</rsrp></response>"#,
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in [
+            "966500000000",
+            "Anad-PC",
+            "AA:BB:CC:DD:EE:FF",
+            "0a1b2c3d4e5f",
+            "Hibi-Phone",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        // The structure and the readings are still there.
+        assert_eq!(v["exchanges"][0]["response"]["lte_rsrp"], json!("-90"));
+        assert_eq!(v["exchanges"][0]["query"]["band"], json!("3"));
+        let xml = v["exchanges"][1]["response"].as_str().unwrap();
+        assert!(
+            xml.contains("<band>3</band>") && xml.contains("<rsrp>-91</rsrp>"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_session_folder_in_a_path_is_starred_in_every_place_a_path_is_shown() {
+        let mut rec = recorder();
+        let script = "load('/api/KDIRFAVOLMZYJHTGAB/info'); load('/cgi-bin/status.cgi');";
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/KDIRFAVOLMZYJHTG/userRpm/Index.js",
+            "Script",
+            json!({}),
+            "application/javascript",
+            script,
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(v["exchanges"][0]["path"], json!("/*/userRpm/Index.js"));
+        assert_eq!(
+            v["exchanges"][0]["apiPaths"],
+            json!(["/api/*/info", "/cgi-bin/status.cgi"])
+        );
+        assert!(!text.contains("KDIRFAVOLMZYJHTG"));
+    }
+
+    #[test]
+    fn a_kept_name_keeps_only_a_reading_or_a_state_word() {
+        let mut rec = recorder();
+        let body = json!({
+            "result": "MyHomeWifi",
+            "status": "{\"ssid\":\"MyHome\"}",
+            "at_result": "+QENG: \"servingcell\",\"NOCONN\",\"LTE\",\"FDD\",420,04,1A2D003,140,1300,3,5,5,54A1,-95,-11",
+            "wifi_mode": "WIFI:T:WPA;S:MyHome;P:hunter22;;",
+            "modem_sn": "SN12345678XYZ",
+            "product_sn": "PSN-000111",
+            "tracking_area_code": "21665",
+            "unlock_code": "8842",
+            "broadband_id": "BB-77-AA",
+            "state": "seen at the gate by someone today",
+            "error_code": "0",
+            "network_type": "5G NSA",
+            "ppp_status": "ppp_connected",
+            "lte_ca_pcell_band": "3",
+        });
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/x",
+            "Fetch",
+            json!({}),
+            "application/json",
+            &body.to_string(),
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in [
+            "MyHomeWifi",
+            "MyHome",
+            "1A2D003",
+            "54A1",
+            "hunter22",
+            "SN12345678XYZ",
+            "PSN-000111",
+            "21665",
+            "8842",
+            "BB-77-AA",
+            "the gate",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        let got = &v["exchanges"][0]["response"];
+        assert_eq!(got["error_code"], json!("0"));
+        assert_eq!(got["network_type"], json!("5G NSA"));
+        assert_eq!(got["ppp_status"], json!("ppp_connected"));
+        assert_eq!(got["lte_ca_pcell_band"], json!("3"));
+    }
+
+    #[test]
+    fn a_sensitive_value_hides_its_length_too() {
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/wlan",
+            "XHR",
+            json!({}),
+            "text/xml",
+            "<response><WifiWpapsk>my-wifi-password</WifiWpapsk><band>3</band></response>",
+        );
+        let (_, v) = built(rec, &opts());
+        assert_eq!(
+            v["exchanges"][0]["response"],
+            json!(format!(
+                "<response><WifiWpapsk>{HIDDEN}</WifiWpapsk><band>3</band></response>"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_page_is_never_included_and_a_script_only_when_nothing_hidden_is_in_it() {
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/hosts",
+            "Fetch",
+            json!({}),
+            "application/json",
+            r#"{"list":[{"DeviceName":"Hibi-iPhone 12"}],"WifiWpapsk":"pa\"ss-word1"}"#,
+        );
+        let page = r#"<html><input name="admin_pw" value="hunter22-admin"><script>var sid = "c0ffee11c0ffee22";</script></html>"#;
+        let js = "application/javascript";
+        let get = |rec: &mut Recorder, id: &str, url: &str, kind: &str, mime: &str, body: &str| {
+            exchange(rec, id, "GET", url, kind, json!({}), mime, body);
+        };
+        get(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/settings.html",
+            "Document",
+            "text/html",
+            page,
+        );
+        get(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/js/login.js",
+            "Script",
+            js,
+            "var salt = 'abc';",
+        );
+        get(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/js/data.js",
+            "Script",
+            js,
+            "var name = 'Hibi-iPhone 12';",
+        );
+        get(
+            &mut rec,
+            "5",
+            "http://192.168.8.1/js/wifi.js",
+            "Script",
+            js,
+            r#"var k = "pa\"ss-word1";"#,
+        );
+        get(
+            &mut rec,
+            "6",
+            "http://192.168.8.1/jsonp?cb=x",
+            "Script",
+            js,
+            "x({a:1})",
+        );
+        get(
+            &mut rec,
+            "7",
+            "http://192.168.8.1/js/app.js",
+            "Script",
+            js,
+            "function bands(){ return 3; }",
+        );
+        let with_code = BuildOptions {
+            include_code: true,
+            ..opts()
+        };
+        let (text, v) = built(rec, &with_code);
+        for gone in [
+            "hunter22-admin",
+            "c0ffee11c0ffee22",
+            "var salt",
+            "Hibi-iPhone",
+            "ss-word1",
+            "x({a:1})",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        let x = &v["exchanges"];
+        for left_out in [1, 2, 3, 4, 5] {
+            assert!(
+                x[left_out].get("text").is_none(),
+                "exchange {} has its code",
+                left_out + 1
+            );
+            assert!(x[left_out].get("note").is_some());
+        }
+        assert_eq!(x[6]["text"], json!("function bands(){ return 3; }"));
+    }
+
+    #[test]
+    fn only_the_object_and_the_method_of_a_ubus_call_stay_readable() {
+        let mut rec = recorder();
+        for (id, body) in [
+            (
+                "1",
+                r#"{"jsonrpc":"2.0","id":1,"method":"call","params":["0a1b2c3d4e5f60718293a4b5c6d7e8f9","uci","get",{"config":"anad.ddns.net","band":"3"}]}"#,
+            ),
+            (
+                "2",
+                r#"{"method":"set","params":["wireless","default_radio0","key","hunter_22"]}"#,
+            ),
+            (
+                "3",
+                r#"{"jsonrpc":"2.0","method":"call","params":["hunter_22","anad_router"]}"#,
+            ),
+        ] {
+            let request = json!({ "postData": body });
+            exchange(
+                &mut rec,
+                id,
+                "POST",
+                "http://192.168.8.1/ubus",
+                "XHR",
+                request,
+                "application/json",
+                "{}",
+            );
+        }
+        let (text, v) = built(rec, &opts());
+        for gone in [
+            "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+            "anad.ddns.net",
+            "default_radio0",
+            "hunter_22",
+            "anad_router",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        let call = &v["exchanges"][0]["request"]["params"];
+        assert_eq!((&call[1], &call[2]), (&json!("uci"), &json!("get")));
+        assert_eq!(call[3]["band"], json!("3"));
+    }
+
+    #[test]
+    fn a_device_on_the_network_in_the_same_answer_is_not_the_model() {
+        let build_one = |body: &str, mime: &str, kind: &str| {
+            let mut rec = recorder();
+            exchange(
+                &mut rec,
+                "1",
+                "GET",
+                "http://192.168.8.1/api/info",
+                kind,
+                json!({}),
+                mime,
+                body,
+            );
+            built(rec, &opts())
+        };
+        let (text, v) = build_one(
+            r#"{"firmware_version":"1.2.3","clients":[{"device_name":"Hibi-PC 2"}]}"#,
+            "application/json",
+            "XHR",
+        );
+        assert_eq!(v["router"]["model"], json!(null));
+        assert_eq!(v["router"]["firmware"], json!("1.2.3"));
+        assert!(!text.contains("Hibi-PC"));
+        // A MAC-shaped "model" is an identifier, not a model.
+        let (text, v) = build_one(
+            r#"{"model":"A4B1C2D3E4F5","hardware_version":"V1"}"#,
+            "application/json",
+            "XHR",
+        );
+        assert_eq!(v["router"]["model"], json!(null));
+        assert!(!text.contains("A4B1C2D3E4F5"));
+        let (_, v) = build_one(
+            r#"{"model_name":"MC888 Ultra","hw_version":"MC888-1.0"}"#,
+            "application/json",
+            "XHR",
+        );
+        assert_eq!(v["router"]["model"], json!("MC888 Ultra"));
+        // LuCI puts the router's host name in the title.
+        let (text, _) = build_one(
+            "<html><title>Anad-Router - Overview - LuCI</title></html>",
+            "text/html",
+            "Document",
+        );
+        assert!(!text.contains("Anad-Router"));
+    }
+
+    #[test]
+    fn a_login_is_recognised_by_more_than_the_word_password() {
+        let mut rec = recorder();
+        let bodies = [
+            r#"{"hash":"0f1e2d3c4b5a69788796a5b4c3d2e1f0"}"#,
+            r#"{"digest":"0f1e2d3c4b5a69788796a5b4c3d2e1f1"}"#,
+            r#"{"otp":"0f1e2d3c4b5a69788796a5b4c3d2e1f2"}"#,
+            r#"{"auth":"0f1e2d3c4b5a69788796a5b4c3d2e1f3"}"#,
+            r#"{"secret":"0f1e2d3c4b5a69788796a5b4c3d2e1f4"}"#,
+            r#"{"x_token":"0f1e2d3c4b5a69788796a5b4c3d2e1f5"}"#,
+        ];
+        for (i, body) in bodies.iter().enumerate() {
+            let request = json!({ "postData": body });
+            let answer = r#"{"band":"3","stok":"aabbccdd00112233"}"#;
+            exchange(
+                &mut rec,
+                &i.to_string(),
+                "POST",
+                "http://192.168.8.1/api/x",
+                "XHR",
+                request,
+                "application/json",
+                answer,
+            );
+        }
+        let (text, v) = built(rec, &opts());
+        for i in 0..bodies.len() {
+            assert_eq!(
+                v["exchanges"][i]["login"],
+                json!(true),
+                "exchange {}",
+                i + 1
+            );
+        }
+        assert!(!text.contains("0f1e2d3c4b5a6978") && !text.contains("aabbccdd00112233"));
+    }
+
+    #[test]
+    fn a_sent_body_that_never_arrived_is_treated_as_a_login() {
+        let mut rec = recorder();
+        let request = json!({ "hasPostData": true });
+        let ask = sent(
+            &mut rec,
+            "1",
+            "POST",
+            "http://192.168.8.1/api/x",
+            "XHR",
+            request,
+            json!({}),
+        );
+        assert_eq!(ask, Some(Ask::RequestBody("1".into())));
+        answered(&mut rec, "1", 200, "application/json", json!({}));
+        finished(&mut rec, "1");
+        rec.response_body("1", r#"{"body":"{\"band\":\"3\"}","base64Encoded":false}"#);
+        let (_, v) = built(rec, &opts());
+        assert_eq!(v["exchanges"][0]["login"], json!(true));
+        assert_eq!(v["exchanges"][0]["response"]["band"], json!(HIDDEN));
+    }
+
+    #[test]
+    fn a_late_sent_body_goes_to_the_request_that_sent_it() {
+        let mut rec = recorder();
+        let request = json!({ "hasPostData": true });
+        sent(
+            &mut rec,
+            "1",
+            "POST",
+            "http://192.168.8.1/save",
+            "Document",
+            request,
+            json!({}),
+        );
+        let hop = json!({ "redirectResponse": { "status": 302, "headers": {} } });
+        sent(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/done",
+            "Document",
+            json!({}),
+            hop,
+        );
+        rec.request_body("1", r#"{"postData":"a=1"}"#);
+        let list = rec.into_exchanges();
+        assert_eq!(list[0].request_body.as_deref(), Some("a=1"));
+        assert_eq!(list[1].request_body, None);
+    }
+
+    #[test]
+    fn an_address_cannot_hide_behind_a_name_or_a_character_reference() {
+        let mut rec = recorder();
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/x",
+            "XHR",
+            json!({}),
+            "text/xml",
+            "<?xml version=\"1.0\" encoding=\"10.9.8.7\"?><response><wanversion>10.134.22.7</wanversion>\
+             <status>&#49;&#48;&#46;&#49;&#46;&#50;&#46;&#51;</status><signal>aabb-ccdd-eeff</signal>\
+             <level>2a00:1:2:3::/64</level><SoftwareVersion>11.0.2.21</SoftwareVersion></response>",
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in [
+            "10.9.8.7",
+            "10.134.22.7",
+            "&#49;",
+            "aabb-ccdd-eeff",
+            "2a00:1:2:3",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        let xml = v["exchanges"][0]["response"].as_str().unwrap();
+        assert!(
+            xml.contains("<SoftwareVersion>11.0.2.21</SoftwareVersion>"),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_content_type_and_a_method_are_kept_only_in_their_usual_shape() {
+        let mut rec = recorder();
+        let headers =
+            json!({ "Content-Type": "text/SECRET-IN-TYPE value; boundary=SECRET-BOUNDARY" });
+        let request = json!({ "headers": headers });
+        sent(
+            &mut rec,
+            "1",
+            "HIBI-SECRET-METHOD",
+            "http://192.168.8.1/api/x",
+            "XHR",
+            request,
+            json!({}),
+        );
+        answered(&mut rec, "1", 200, "weird type SECRET-MIME", json!({}));
+        let request = json!({ "headers": { "content-type": "Application/JSON; charset=utf-8" } });
+        sent(
+            &mut rec,
+            "2",
+            "POST",
+            "http://192.168.8.1/api/y",
+            "XHR",
+            request,
+            json!({}),
+        );
+        let (text, v) = built(rec, &opts());
+        assert!(!text.contains("SECRET"), "{text}");
+        assert_eq!(v["exchanges"][0]["method"], json!("OTHER"));
+        assert_eq!(v["exchanges"][1]["requestType"], json!("application/json"));
+    }
+
+    #[test]
+    fn a_very_long_address_is_not_kept() {
+        let mut rec = recorder();
+        let long = "a".repeat(100 * 1024);
+        for i in 0..MAX_EXCHANGES {
+            let url = format!("http://192.168.8.1/api/x?q={long}");
+            sent(
+                &mut rec,
+                &i.to_string(),
+                "GET",
+                &url,
+                "Fetch",
+                json!({}),
+                json!({}),
+            );
+        }
+        let list = rec.into_exchanges();
+        assert_eq!(list.len(), MAX_EXCHANGES);
+        assert!(list
+            .iter()
+            .all(|x| x.path == TOO_LONG && x.query.is_empty()));
+    }
+
+    #[test]
+    fn addresses_and_names_count_against_the_size_limit() {
+        // Not reachable through the events (500 requests of 8 KiB), so the count is checked itself.
+        let mut rec = recorder();
+        assert!(rec.charge(MAX_TOTAL_BYTES - 10));
+        let url = "http://192.168.8.1/api/a-path-longer-than-ten-bytes";
+        assert_eq!(
+            sent(&mut rec, "1", "GET", url, "Fetch", json!({}), json!({})),
+            None
+        );
+        assert_eq!((rec.len(), rec.limit()), (0, Some(Limit::Size)));
+    }
+
+    #[test]
+    fn only_a_web_address_can_be_recorded() {
+        for not_web in ["file:///C:/router.html", "data:text/html,hi", "about:blank"] {
+            assert!(
+                Recorder::new(&Url::parse(not_web).unwrap()).is_none(),
+                "{not_web}"
+            );
+        }
+        assert!(Recorder::new(&Url::parse("https://192.168.8.1:8443/").unwrap()).is_some());
+    }
+
+    #[test]
+    fn what_is_recorded_does_not_print_its_contents() {
+        let mut rec = recorder();
+        let request = json!({ "postData": "SENT-SECRET" });
+        exchange(
+            &mut rec,
+            "1",
+            "POST",
+            "http://192.168.8.1/api/x?k=QUERY-SECRET",
+            "XHR",
+            request,
+            "text/plain",
+            "ANSWER-SECRET",
+        );
+        let printed = format!("{:?}", rec.into_exchanges());
+        assert!(!printed.contains("SECRET"), "{printed}");
+        assert!(printed.contains("/api/x"));
+    }
+
+    #[test]
+    fn a_long_list_of_field_names_in_a_command_stays_whole() {
+        let mut rec = recorder();
+        let names: Vec<String> = (0..60).map(|i| format!("lte_field_name_{i}")).collect();
+        let list = names.join(",");
+        let url = format!(
+            "http://192.168.8.1/goform/get?cmd={}&multi_data=1",
+            list.replace(',', "%2C")
+        );
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            &url,
+            "XHR",
+            json!({}),
+            "application/json",
+            "{}",
+        );
+        let (_, v) = built(rec, &opts());
+        assert_eq!(v["exchanges"][0]["query"]["cmd"], json!(list));
     }
 }

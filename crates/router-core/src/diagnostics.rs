@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use quick_xml::events::attributes::Attribute;
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::name::QName;
 use quick_xml::{Reader, Writer};
 use serde_json::{json, Map, Value};
@@ -139,26 +139,88 @@ pub enum Rules {
     ShapeOnly,
 }
 
-/// What a `ShapeOnly` value becomes.
+/// What a hidden value becomes when its length must not show either.
 pub const HIDDEN: &str = "(hidden)";
 /// A kept value longer than this is free text, not a reading or a setting.
-const KEPT_MAX: usize = 200;
+const KEPT_MAX: usize = 64;
+/// A command's list of the field names it asks for (`cmd=rsrp,sinr,...`) may be this long.
+const NAME_LIST_MAX: usize = 4096;
+/// A name longer than this is data, not a name.
+const NAME_MAX: usize = 48;
+/// A value hidden only for its name is remembered, for the check of included code, from this
+/// length up.
+const SOFT_MIN: usize = 8;
 
 /// Sensitive in a capture as well: a page can show messages, contacts and Wi-Fi secrets that the
 /// app's own reads never touch.
 const CAPTURE_SENSITIVE_PARTS: &[&str] = &[
-    "sms", "content", "message", "subject", "contact", "psk", "wpa", "wep", "secret", "pass",
-    "cred", "cookie", "csrf", "session", "location", "alias", "owner", "mail", "account", "ecgi",
+    "sms",
+    "content",
+    "message",
+    "subject",
+    "contact",
+    "psk",
+    "wpa",
+    "wep",
+    "secret",
+    "pass",
+    "cred",
+    "cookie",
+    "csrf",
+    "session",
+    "location",
+    "alias",
+    "owner",
+    "mail",
+    "account",
+    "ecgi",
+    "scrambling",
+    "unlock",
 ];
 /// The same, as whole words of a name (`cellId` is `cell` and `id`), where the word alone would
-/// match too much as a part.
+/// match too much as a part. The plurals name lists of people's devices.
 const CAPTURE_SENSITIVE_WORDS: &[&str] = &[
-    "ci", "cid", "eci", "nci", "gci", "sid", "msg", "text", "body", "pin", "puk", "pw", "psw",
-    "url", "uri", "number", "host", "addr", "desc", "label", "login", "auth",
+    "ci",
+    "cid",
+    "eci",
+    "nci",
+    "gci",
+    "sid",
+    "id",
+    "sn",
+    "esn",
+    "psc",
+    "area",
+    "qr",
+    "access",
+    "msg",
+    "text",
+    "body",
+    "pin",
+    "puk",
+    "pw",
+    "psw",
+    "url",
+    "uri",
+    "number",
+    "host",
+    "hosts",
+    "clients",
+    "stations",
+    "leases",
+    "contacts",
+    "users",
+    "messages",
+    "neighbors",
+    "neighbours",
+    "addr",
+    "desc",
+    "label",
+    "login",
+    "auth",
 ];
-/// Names whose values a capture keeps exactly: signal readings, band and mode settings, states,
-/// the command a request names, and what the model and the operator are.
-const CAPTURE_KEEP_PARTS: &[&str] = &[
+/// Names of readings and of what the router is: their values are kept when they read like one.
+const CAPTURE_READING_PARTS: &[&str] = &[
     "rsrp",
     "rsrq",
     "sinr",
@@ -169,9 +231,6 @@ const CAPTURE_KEEP_PARTS: &[&str] = &[
     "band",
     "arfcn",
     "freq",
-    "mode",
-    "state",
-    "status",
     "version",
     "model",
     "hardware",
@@ -183,17 +242,6 @@ const CAPTURE_KEEP_PARTS: &[&str] = &[
     "plmn",
     "operator",
     "numeric",
-    "enable",
-    "switch",
-    "result",
-    "support",
-    "capab",
-    "roam",
-    "goform",
-    "command",
-    "method",
-    "action",
-    "jsonrpc",
     "nettype",
     "networktype",
     "network_type",
@@ -201,10 +249,25 @@ const CAPTURE_KEEP_PARTS: &[&str] = &[
     "duplex",
     "aggregat",
 ];
-const CAPTURE_KEEP_WORDS: &[&str] = &[
-    "rat", "type", "code", "cmd", "mcc", "mnc", "snr", "cqi", "csq", "bw", "bar", "bars", "level",
-    "error", "errno", "errcode", "func", "module", "object", "lock", "mimo", "rank", "dbm",
+const CAPTURE_READING_WORDS: &[&str] = &[
+    "rat", "mcc", "mnc", "snr", "cqi", "csq", "bw", "bar", "bars", "level", "mimo", "rank", "dbm",
 ];
+/// Names of states and of the command a request names. These names are generic, so their values
+/// are kept only as one word of a state (`state_word`).
+const CAPTURE_STATE_PARTS: &[&str] = &[
+    "mode", "state", "status", "enable", "switch", "result", "support", "capab", "roam", "goform",
+    "command", "method", "action", "jsonrpc",
+];
+const CAPTURE_STATE_WORDS: &[&str] = &[
+    "type", "cmd", "error", "errno", "errcode", "ret", "retcode", "func", "module", "object",
+    "lock",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Reading,
+    State,
+}
 
 /// A name's words, lowercased: split at anything that isn't a letter or digit, where a small
 /// letter meets a capital, where an acronym ends (`LTEBand`), and between letters and digits.
@@ -236,50 +299,124 @@ fn words(name: &str) -> Vec<String> {
     out
 }
 
-/// Sensitive under the capture's rules. A band mask (`lte_band_mask`) is a setting, not the
-/// subnet mask that `mask` is on the list for.
+/// Sensitive under the capture's rules.
 pub fn capture_sensitive(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    let listed = SENSITIVE_TAGS.contains(&n.as_str())
-        || SENSITIVE_PARTS
-            .iter()
-            .any(|p| n.contains(p) && !(*p == "mask" && n.contains("band")))
-        || CAPTURE_SENSITIVE_PARTS.iter().any(|p| n.contains(p));
-    listed
-        || words(name)
-            .iter()
-            .any(|w| CAPTURE_SENSITIVE_WORDS.contains(&w.as_str()))
-}
-
-/// Whether a capture keeps the value under this name exactly.
-pub fn capture_keeps(name: &str) -> bool {
-    if capture_sensitive(name) {
-        return false;
+    let w = words(name);
+    // `lte_band_mask` is a setting, not a subnet mask, and `lte_ca_pcell_band` is a band, not a
+    // cell's identity.
+    let radio =
+        ["band", "freq", "arfcn"].iter().any(|r| n.contains(r)) || w.iter().any(|x| x == "bw");
+    let excused = |p: &str| (p == "mask" && n.contains("band")) || (p == "cell" && radio);
+    if SENSITIVE_TAGS.contains(&n.as_str())
+        || SENSITIVE_PARTS.iter().any(|p| n.contains(p) && !excused(p))
+        || CAPTURE_SENSITIVE_PARTS.iter().any(|p| n.contains(p))
+    {
+        return true;
     }
-    let n = name.to_ascii_lowercase();
-    CAPTURE_KEEP_PARTS.iter().any(|p| n.contains(p))
-        || words(name)
-            .iter()
-            .any(|w| CAPTURE_KEEP_WORDS.contains(&w.as_str()))
+    // `goformId` names a command. Every other id is an identifier.
+    w.iter().any(|x| {
+        CAPTURE_SENSITIVE_WORDS.contains(&x.as_str()) && !(x == "id" && n.contains("goform"))
+    })
 }
 
-/// A name a program gives a thing, like `router_get_status` or `zwrt_web.api`: small letters,
-/// digits, `_` and `.`, with at least one of the two joiners. JSON-RPC puts these in a bare list.
-fn code_like(s: &str) -> bool {
-    s.len() <= 64
+fn keep_class(name: &str) -> Option<Keep> {
+    if capture_sensitive(name) {
+        return None;
+    }
+    // A modem is a part, not a mode.
+    let n = name.to_ascii_lowercase().replace("modem", "");
+    let w = words(name);
+    let word_in = |list: &[&str]| w.iter().any(|x| list.contains(&x.as_str()));
+    if CAPTURE_READING_PARTS.iter().any(|p| n.contains(p)) || word_in(CAPTURE_READING_WORDS) {
+        Some(Keep::Reading)
+    } else if CAPTURE_STATE_PARTS.iter().any(|p| n.contains(p)) || word_in(CAPTURE_STATE_WORDS) {
+        Some(Keep::State)
+    } else {
+        None
+    }
+}
+
+/// Whether a capture may keep the value under this name exactly.
+pub fn capture_keeps(name: &str) -> bool {
+    keep_class(name).is_some()
+}
+
+/// A name a program gives a field: letters, digits and `_`, not long, and neither an identifier
+/// nor a random-looking token. A short number is a position in a list.
+fn plain_name(s: &str) -> bool {
+    let digits = s.bytes().filter(u8::is_ascii_digit).count();
+    if !s.is_empty() && s.len() <= 4 && digits == s.len() {
+        return true;
+    }
+    s.len() <= NAME_MAX
+        && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !(s.len() >= 16 && digits >= 4)
+        && identifier_hits(s).is_empty()
+}
+
+/// A reading or a setting as routers write one: short, plain characters, a few words at most.
+fn plain_value(s: &str) -> bool {
+    s.len() <= KEPT_MAX
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || " _.,:+/()%-".contains(c))
+        && s.split(' ').filter(|w| !w.is_empty()).count() <= 4
+}
+
+/// One word of a state: a number, letters in one case, or words joined by `_` or `-`.
+fn state_word(s: &str) -> bool {
+    let numeric = s.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c));
+    let wordy = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let mixed =
+        s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase());
+    !s.is_empty() && s.len() <= NAME_MAX && (numeric || (wordy && (s.contains('_') || !mixed)))
+}
+
+/// `rsrp,sinr,lte_band`: the field names a command asks for.
+fn name_list(s: &str) -> bool {
+    s.len() <= NAME_LIST_MAX && s.contains(',') && s.split(',').all(plain_name)
+}
+
+/// The object or the method of a ubus call, like `zwrt_router.api` or `get`.
+fn ubus_name(s: &str) -> bool {
+    s.len() <= NAME_MAX
         && s.starts_with(|c: char| c.is_ascii_lowercase())
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
-        && s.contains(['_', '.'])
         && identifier_hits(s).is_empty()
+}
+
+/// OpenWrt's JSON-RPC: `{"jsonrpc":…,"method":"call","params":[session, object, method, {…}]}`.
+/// Only this exact shape lets the object and the method through by their position.
+fn ubus_call(m: &Map<String, Value>) -> bool {
+    m.get("jsonrpc").is_some_and(Value::is_string)
+        && m.get("method").and_then(Value::as_str) == Some("call")
+        && m.get("params").and_then(Value::as_array).is_some_and(|p| {
+            p.len() == 4 && p[..3].iter().all(Value::is_string) && p[3].is_object()
+        })
+}
+
+/// A version's own name, not one that could hold an address (`wanversion`).
+fn version_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n.ends_with("version")
+        && !["wan", "lan", "dns", "gateway", "addr", "host", "mac", "ip"]
+            .iter()
+            .any(|p| n.contains(p))
 }
 
 /// Replaces values and remembers what it replaced, for the leak scan.
 #[derive(Default)]
 pub struct Redactor {
     secrets: BTreeSet<String>,
+    /// Values hidden only for their name, under the capture's rules.
+    soft: BTreeSet<String>,
     generated: BTreeSet<String>,
     counter: u32,
+    names: u32,
     rules: Rules,
 }
 
@@ -383,8 +520,13 @@ impl Redactor {
         }
         if secret {
             self.secrets.insert(value.to_string());
+        } else if value.len() >= SOFT_MIN
+            && !value.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+        {
+            // An ordinary small word ("connected") is in every script; a name or a number isn't.
+            self.soft.insert(value.to_string());
         }
-        if self.rules == Rules::ShapeOnly {
+        if self.rules == Rules::ShapeOnly || (secret && self.rules == Rules::Capture) {
             return HIDDEN.to_string();
         }
         self.counter += 1;
@@ -425,8 +567,8 @@ impl Redactor {
     fn rewrite_xml(&mut self, xml: &str, label: &str) -> Option<String> {
         let mut reader = Reader::from_str(xml);
         let mut writer = Writer::new(Vec::new());
-        // The open elements: name, and whether they or a parent are sensitive.
-        let mut open: Vec<(String, bool)> = Vec::new();
+        // The open elements: name, whether they or a parent are sensitive, and the name written.
+        let mut open: Vec<(String, bool, String)> = Vec::new();
         loop {
             let secret = open.last().is_some_and(|o| o.1);
             let inside = open.last().map(|o| o.0.clone()).unwrap_or_default();
@@ -439,18 +581,20 @@ impl Redactor {
                 Event::Start(e) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                     let hide = secret || self.sensitive(&name);
-                    let tag = self.xml_tag(&e, &name, hide, label)?;
-                    open.push((name, hide));
+                    let shown = self.xml_name(&name);
+                    let tag = self.xml_tag(&e, &name, &shown, hide, label)?;
+                    open.push((name, hide, shown));
                     Event::Start(tag)
                 }
                 Event::Empty(e) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
                     let hide = secret || self.sensitive(&name);
-                    Event::Empty(self.xml_tag(&e, &name, hide, label)?)
+                    let shown = self.xml_name(&name);
+                    Event::Empty(self.xml_tag(&e, &name, &shown, hide, label)?)
                 }
-                Event::End(e) => {
-                    open.pop()?;
-                    Event::End(e)
+                Event::End(_) => {
+                    let (_, _, shown) = open.pop()?;
+                    Event::End(BytesEnd::new(shown))
                 }
                 Event::Text(t)
                     if (secret || unlisted) && !t.iter().all(u8::is_ascii_whitespace) =>
@@ -468,7 +612,10 @@ impl Redactor {
                     Event::Text(BytesText::from_escaped(fake))
                 }
                 Event::Comment(_) | Event::DocType(_) | Event::PI(_) => continue,
-                Event::GeneralRef(_) if secret || unlisted => continue,
+                // A reference can spell out anything a character at a time, past every check, and
+                // the declaration is free text too.
+                Event::GeneralRef(_) | Event::Decl(_) if strict => continue,
+                Event::GeneralRef(_) if secret => continue,
                 other => other,
             };
             writer.write_event(event).ok()?;
@@ -479,14 +626,16 @@ impl Redactor {
         String::from_utf8(writer.into_inner()).ok()
     }
 
+    /// `name` is the element's own name, which decides what is hidden; `shown` is what is written.
     fn xml_tag(
         &mut self,
         tag: &BytesStart<'_>,
         name: &str,
+        shown: &str,
         hide: bool,
         label: &str,
     ) -> Option<BytesStart<'static>> {
-        let mut out = BytesStart::new(name.to_string());
+        let mut out = BytesStart::new(shown.to_string());
         for attr in tag.attributes() {
             let attr = attr.ok()?;
             let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
@@ -501,12 +650,36 @@ impl Redactor {
             } else {
                 attr.value
             };
+            let key = self.xml_name(&key);
             out.push_attribute(Attribute {
                 key: QName(key.as_bytes()),
                 value,
             });
         }
         Some(out)
+    }
+
+    /// A name as the file shows it. Under the stricter rules a router's page chooses the names, so
+    /// one that doesn't read like a field's name is data: it gets a numbered stand-in.
+    fn name(&mut self, name: &str) -> String {
+        if self.rules == Rules::Diagnostics || plain_name(name) {
+            return name.to_string();
+        }
+        self.names += 1;
+        format!("hidden_name_{}", self.names)
+    }
+
+    /// The same for an element or an attribute, which may carry one namespace prefix.
+    fn xml_name(&mut self, name: &str) -> String {
+        let plain = match name.split_once(':') {
+            Some((prefix, local)) => plain_name(prefix) && plain_name(local),
+            None => plain_name(name),
+        };
+        if self.rules == Rules::Diagnostics || plain {
+            return name.to_string();
+        }
+        self.names += 1;
+        format!("hidden_name_{}", self.names)
     }
 
     /// One response body, by what it is. JSON stays JSON, so its keys can be read.
@@ -531,15 +704,18 @@ impl Redactor {
     fn json_at(&mut self, v: &Value, label: &str, key: &str) -> Value {
         match v {
             Value::Object(m) => {
+                let ubus = self.rules == Rules::Capture && ubus_call(m);
                 let mut out = Map::new();
                 for (k, x) in m {
                     let l = format!("{label}.{k}");
-                    let red = if self.sensitive(k) {
+                    let red = if ubus && k == "params" {
+                        self.ubus_params(x, &l)
+                    } else if self.sensitive(k) {
                         self.leaf_json(x, &l)
                     } else {
                         self.json_at(x, &l, k)
                     };
-                    out.insert(k.clone(), red);
+                    out.insert(self.name(k), red);
                 }
                 Value::Object(out)
             }
@@ -552,8 +728,6 @@ impl Redactor {
             Value::String(s) => Value::String(match self.rules {
                 Rules::Diagnostics => self.xml(s, label),
                 _ if !self.hides(key) => self.kept(s, key, label, false),
-                // JSON-RPC names the object and the method it calls in a bare list.
-                _ if key == "params" && code_like(s) => s.clone(),
                 _ => self.stand_in(s, label, false),
             }),
             Value::Number(n) if self.rules != Rules::Diagnostics => {
@@ -571,17 +745,45 @@ impl Redactor {
         }
     }
 
-    /// A value the stricter rules let through: still no free text, and no identifier inside it.
+    /// `[session, object, method, {…}]` of a ubus call (`ubus_call` checked the shape): the
+    /// session is a secret, and the object and the method are what a driver needs to read.
+    fn ubus_params(&mut self, params: &Value, label: &str) -> Value {
+        let Some([session, object, method, args]) = params.as_array().map(Vec::as_slice) else {
+            return self.leaf_json(params, label);
+        };
+        let name = |red: &mut Self, v: &Value, at: &str| match v.as_str() {
+            Some(s) if ubus_name(s) => Value::String(s.to_string()),
+            Some(s) => Value::String(red.stand_in(s, at, false)),
+            None => Value::Null,
+        };
+        Value::Array(vec![
+            self.leaf_json(session, &format!("{label}[0]")),
+            name(self, object, &format!("{label}[1]")),
+            name(self, method, &format!("{label}[2]")),
+            self.json_at(args, &format!("{label}[3]"), ""),
+        ])
+    }
+
+    /// A value the stricter rules let through by its name. It must still read like a reading or a
+    /// state, and hold no identifier.
     fn kept(&mut self, text: &str, name: &str, label: &str, xml_leaf: bool) -> String {
         if !xml_leaf && text.contains('<') {
             return self.xml(text, label);
         }
-        if !text.is_ascii() || text.contains('@') || text.len() > KEPT_MAX {
+        if words(name).iter().any(|w| w == "cmd") && name_list(text) {
+            return text.to_string();
+        }
+        let state = keep_class(name) == Some(Keep::State);
+        if !text.is_ascii() || !plain_value(text) || (state && !state_word(text)) {
             return self.stand_in(text, label, false);
         }
-        // The leak scan lets a version and a band mask through by their XML name, so they stay.
-        let n = name.to_ascii_lowercase();
-        if xml_leaf && (n.ends_with("version") || n.ends_with("band")) {
+        // The leak scan lets a version and a band mask through by their XML name. Here they must
+        // also be under a version's own name, or look like a mask.
+        let mask = text
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || "x, ".contains(c));
+        let band = name.to_ascii_lowercase().ends_with("band");
+        if xml_leaf && (version_name(name) || (band && mask)) {
             return text.to_string();
         }
         redact_identifier_tokens(text).0
@@ -598,23 +800,38 @@ impl Redactor {
             Value::String(s) => Value::String(self.value(s, label)),
             Value::Null | Value::Bool(_) => v.clone(),
             // A nested object under a sensitive key: redact every scalar inside it.
-            Value::Object(m) => Value::Object(
-                m.iter()
-                    .map(|(k, x)| (k.clone(), self.leaf_json(x, &format!("{label}.{k}"))))
-                    .collect(),
-            ),
+            Value::Object(m) => {
+                let mut out = Map::new();
+                for (k, x) in m {
+                    let red = self.leaf_json(x, &format!("{label}.{k}"));
+                    out.insert(self.name(k), red);
+                }
+                Value::Object(out)
+            }
             Value::Array(a) => Value::Array(a.iter().map(|x| self.leaf_json(x, label)).collect()),
         }
+    }
+
+    /// Whether `text`, as it is and not yet escaped for a file, holds a value this redactor hid.
+    /// For text that can't be parsed by name (a router's script), before it is let into a file.
+    pub fn holds_hidden(&self, text: &str) -> bool {
+        let loose = text.replace('\\', "");
+        let hard = self
+            .secrets
+            .iter()
+            .any(|s| s.len() >= 6 && !self.generated.contains(s) && written_in(text, &loose, s));
+        hard || self.soft.iter().any(|s| written_in(text, &loose, s))
     }
 
     /// The leak scan of redact-har.mjs over the finished text. Any hit blocks the export.
     pub fn leaks(&self, text: &str) -> Vec<String> {
         let mut found = Vec::new();
         // An original that already is a documentation value ("2001:db8::1") maps to itself.
+        let loose = text.replace('\\', "");
         if self
             .secrets
             .iter()
-            .any(|s| s.len() >= 6 && !self.generated.contains(s) && text.contains(s.as_str()))
+            .any(|s| s.len() >= 6 && !self.generated.contains(s) && written_in(text, &loose, s))
         {
             found.push("an original identifier is still present".to_string());
         }
@@ -629,6 +846,12 @@ impl Redactor {
         ));
         found
     }
+}
+
+/// Whether `text` holds `value`, as it is or written with escapes: a finished JSON file and a
+/// script both put a backslash before a quote. `loose` is `text` without its backslashes.
+fn written_in(text: &str, loose: &str, value: &str) -> bool {
+    text.contains(value) || loose.contains(&value.replace('\\', ""))
 }
 
 /// Parses `tag>value</tag` at the start of `s` (the `<` already consumed); `value` holds no `<`.
@@ -692,6 +915,10 @@ fn word(c: char) -> bool {
 fn pattern_hits(text: &str, generated: &BTreeSet<String>) -> Vec<String> {
     let mut hits = BTreeSet::new();
     for tok in text.split(|c: char| !(word(c) || ".:-".contains(c))) {
+        // A prefix like `2a00:1:2::` loses its ending below, and with it what makes it an address.
+        if ipv6_prefix(tok) {
+            hits.insert("an IPv6 address");
+        }
         let tok = tok.trim_matches(|c: char| ".:-".contains(c));
         if generated.contains(tok) {
             continue;
@@ -779,7 +1006,10 @@ pub fn redact_identifier_tokens(text: &str) -> (String, Vec<String>) {
         if core.is_empty() {
             continue;
         }
-        let hits = pattern_hits(core, &none);
+        let mut hits = pattern_hits(core, &none);
+        if hits.is_empty() && ipv6_prefix(tok) {
+            hits.push("an IPv6 address".to_string());
+        }
         let Some(first) = hits.first() else { continue };
         let core_start =
             s + (tok.len() - tok.trim_start_matches(|c: char| ".:-".contains(c)).len());
@@ -801,11 +1031,17 @@ fn is_ipv6(tok: &str) -> bool {
         && ((tok.contains("::") && hex >= 4) || tok.matches(':').count() == 7)
 }
 
-/// `AABBCCDDEEFF` or `AABB.CCDD.EEFF`. All digits is more likely a plain number.
+/// A token as the text has it, ending in `::`: an IPv6 prefix such as `2a00:1:2:3::`.
+fn ipv6_prefix(tok: &str) -> bool {
+    let t = tok.trim_matches(|c: char| ".-".contains(c));
+    t.ends_with("::") && is_ipv6(t) && !t.to_ascii_lowercase().starts_with("2001:db8:")
+}
+
+/// `AABBCCDDEEFF`, `AABB.CCDD.EEFF` or `AABB-CCDD-EEFF`. All digits is more likely a plain number.
 fn is_bare_mac(tok: &str) -> bool {
     let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
     let shaped = (tok.len() == 12 && hex(tok))
-        || (tok.len() == 14 && tok.split('.').all(|g| g.len() == 4 && hex(g)));
+        || (tok.len() == 14 && tok.split(['.', '-']).all(|g| g.len() == 4 && hex(g)));
     shaped && tok.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
