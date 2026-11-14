@@ -346,10 +346,7 @@ pub fn start(app: &AppHandle) {
         };
         let mut file = StateFile::load(&dir);
         let mut plan = Plan::default();
-        loop {
-            let Some(state) = app.try_state::<AppState>() else {
-                break;
-            };
+        while let Some(state) = app.try_state::<AppState>() {
             let cfg = state.history_settings().auto_speed_test;
             let blockers = blockers_now(&app, &state);
             let now = now_ms();

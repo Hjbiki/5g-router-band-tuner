@@ -196,7 +196,7 @@ fn recent_speedtests_at(
 ) -> Result<Vec<SpeedTestResult>, String> {
     let floor = now_ms.saturating_sub(RECENT_DAYS * 24 * 3_600_000);
     let newest_first = |mut h: Vec<SpeedTestResult>| {
-        h.sort_by(|a, b| b.at_ms.cmp(&a.at_ms));
+        h.sort_by_key(|a| std::cmp::Reverse(a.at_ms));
         let keep = h
             .iter()
             .filter(|r| r.at_ms >= floor)
