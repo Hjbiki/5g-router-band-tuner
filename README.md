@@ -86,9 +86,11 @@
 1. اضغط [**تنزيل لويندوز**](https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/5G-Router-Band-Tuner-Setup.exe). ينزّل دائمًا أحدث إصدار، ولا تحتاج إلى حساب في GitHub.
 2. شغّل الملف. يجلب المثبّت مكوّن WebView2 إذا لم يكن موجودًا في جهازك.
 
+**لا تريد التثبيت؟** نزّل [**النسخة المحمولة**](https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/5G-Router-Band-Tuner-Portable.exe): ملف واحد تشغّله مباشرة. تحفظ إعداداتها في ملفك الشخصي على ويندوز مثل النسخة المثبّتة. إذا لم يفتح شيء فاستخدم المثبّت.
+
 الإصدارات الأقدم والإصدارات التجريبية ومثبّت MSI موجودة في [صفحة الإصدارات](https://github.com/Hjbiki/5g-router-band-tuner/releases).
 
-**قد يحذّرك ويندوز.** المثبّتات غير موقّعة رقميًا بعد، فقد تظهر رسالة SmartScreen «Windows protected your PC». للمتابعة اختر **More info** ثم **Run anyway**.
+**قد يحذّرك ويندوز.** ملفات التنزيل غير موقّعة رقميًا بعد، فقد تظهر رسالة SmartScreen «Windows protected your PC». للمتابعة اختر **More info** ثم **Run anyway**.
 
 **الإصدارات التجريبية:** الزر لا ينزّلها أبدًا. معظم الجديد في الإصدار التجريبي لم يُختبر إلا على الراوتر التجريبي، لا على جهاز حقيقي. وتبيّن [قائمة فحص الجهاز](docs/DEVICE_CHECKLIST.md) ما جرى تأكيده.
 

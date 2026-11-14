@@ -84,9 +84,11 @@ The change is applied and checked, the router reconnects, then a trial counts do
 1. Press [**Download for Windows**](https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/5G-Router-Band-Tuner-Setup.exe). It always gets the newest release, and you don't need a GitHub account.
 2. Run the file. The installer gets the WebView2 runtime if your PC doesn't have it.
 
+**Don't want to install?** Get the [**portable version**](https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/5G-Router-Band-Tuner-Portable.exe): one file that you just run. It keeps its settings in your Windows profile, like the installed app. If nothing opens, use the installer.
+
 Older versions, pre-releases and an `.msi` installer are on the [Releases page](https://github.com/Hjbiki/5g-router-band-tuner/releases).
 
-**Windows may warn you.** The installers aren't code-signed yet, so SmartScreen can show "Windows protected your PC". To continue, choose **More info**, then **Run anyway**.
+**Windows may warn you.** The downloads aren't code-signed yet, so SmartScreen can show "Windows protected your PC". To continue, choose **More info**, then **Run anyway**.
 
 **Pre-releases:** the button never downloads one. Most of what's new in a pre-release has only been tested against the demo router, not on real hardware. [The device checklist](docs/DEVICE_CHECKLIST.md) shows what's been confirmed.
 

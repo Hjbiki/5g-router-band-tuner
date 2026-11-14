@@ -154,6 +154,15 @@ export function setJsonVersion(text, version) {
  */
 export const STABLE_SETUP_NAME = "5G-Router-Band-Tuner-Setup.exe";
 
+/** Where a release build leaves the app's own exe, from the repo root. It runs without installing. */
+export const APP_EXE = "target/release/router-band-tuner.exe";
+
+/**
+ * The app's own exe on every release, under a name that never changes: the README's portable
+ * link points at it on the newest release. It must not end in `-setup.exe`.
+ */
+export const STABLE_PORTABLE_NAME = "5G-Router-Band-Tuner-Portable.exe";
+
 /**
  * The one installer the fixed-name copy is made from: the NSIS setup, not the MSI. With none, or
  * with more than one (the release would be guessing what the README's button serves), `source`

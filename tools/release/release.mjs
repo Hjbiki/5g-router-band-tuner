@@ -24,6 +24,7 @@ import { stdin, stdout } from "node:process";
 import { fileURLToPath } from "node:url";
 
 import {
+  APP_EXE,
   bumpVersion,
   cargoWorkspaceVersion,
   changelogSection,
@@ -39,6 +40,7 @@ import {
   releaseSection,
   setCargoWorkspaceVersion,
   setJsonVersion,
+  STABLE_PORTABLE_NAME,
   STABLE_SETUP_NAME,
   stableSetupSource,
 } from "./lib.mjs";
@@ -197,7 +199,12 @@ async function publish(ask, version, section, prerelease) {
   if (!setup.source) throw new Abort(`${setup.problem}: the README's Download button needs exactly one`);
   const stable = join(ROOT, "target", STABLE_SETUP_NAME);
   copyFileSync(setup.source, stable);
-  const files = [...built, stable];
+  // The app's own exe runs without installing: the README's portable link serves this copy.
+  const app = join(ROOT, APP_EXE);
+  if (!existsSync(app)) throw new Abort(`no ${APP_EXE}: the README's portable link needs the app's own exe`);
+  const portable = join(ROOT, "target", STABLE_PORTABLE_NAME);
+  copyFileSync(app, portable);
+  const files = [...built, stable, portable];
   const remote = run("git", ["remote", "get-url", "origin"], { capture: true });
   if (!remote.ok) throw new Abort("no 'origin' remote: add it, then run release.bat --publish");
 

@@ -1,11 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  APP_EXE,
+  STABLE_PORTABLE_NAME,
   STABLE_SETUP_NAME,
   installersFor,
   publishedNotes,
@@ -156,18 +168,23 @@ test("two setups for one version are refused, so the release never guesses what 
   assert.match(found.problem, /2 setup/);
 });
 
-test("the fixed name is safe to put in a link as it is", () => {
-  assert.match(STABLE_SETUP_NAME, /^[A-Za-z0-9.-]+\.exe$/);
+test("the fixed names are safe to put in a link as they are", () => {
+  for (const name of [STABLE_SETUP_NAME, STABLE_PORTABLE_NAME]) assert.match(name, /^[A-Za-z0-9.-]+\.exe$/);
+  // The portable copy must never be taken for the installer the Download button serves.
+  assert.equal(stableSetupSource([`C:/out/${STABLE_PORTABLE_NAME}`]).source, null);
+  assert.notEqual(STABLE_PORTABLE_NAME, STABLE_SETUP_NAME);
 });
 
-test("both READMEs link their Download button to the file every release uploads", () => {
+test("both READMEs link the installer and the portable copy every release uploads", () => {
   // README.md is the Arabic one, the page GitHub shows first; README.en.md is the English one.
   for (const name of ["README.md", "README.en.md"]) {
     const readme = readFileSync(new URL(`../../${name}`, import.meta.url), "utf8");
-    assert.ok(
-      readme.includes(`https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/${STABLE_SETUP_NAME}`),
-      `${name} has no link to the newest ${STABLE_SETUP_NAME}`,
-    );
+    for (const file of [STABLE_SETUP_NAME, STABLE_PORTABLE_NAME]) {
+      assert.ok(
+        readme.includes(`https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/${file}`),
+        `${name} has no link to the newest ${file}`,
+      );
+    }
   }
 });
 
@@ -230,38 +247,56 @@ test("only the publishing job may write to the repo, and only on a version tag",
   assert.match(release, /tags:\s*\['v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+'\]/);
 });
 
-test("the upload folder holds only this version's files, whatever an earlier build left there", () => {
-  // The build folder comes back from the workflow's cache, so it can hold an earlier version's
-  // installers and upload folder. None of that may reach the release.
+/**
+ * Runs the real `ci-release.mjs collect` in a made-up build folder for version 1.0.0, with
+ * `extra` files added and `without` files left out, and hands the result to `check`.
+ */
+function collectIn({ extra = {}, without = [] }, check) {
   const root = mkdtempSync(join(tmpdir(), "rbt-collect-"));
   try {
-    const put = (path, text = "x") => {
+    const files = {
+      "Cargo.toml": '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "1.0.0"\n',
+      "CHANGELOG.md": "# Changelog\n\n## [1.0.0] - d\n\n- New.\n\n## [0.1.0] - d\n\n- Old.\n",
+      [APP_EXE]: "the app",
+      "target/release/bundle/nsis/5G Router Band Tuner_1.0.0_x64-setup.exe": "new setup",
+      "target/release/bundle/msi/5G Router Band Tuner_1.0.0_x64_en-US.msi": "new msi",
+      ...extra,
+    };
+    for (const [path, text] of Object.entries(files)) {
+      if (without.includes(path)) continue;
       mkdirSync(join(root, path, ".."), { recursive: true });
       writeFileSync(join(root, path), text);
-    };
+    }
+    mkdirSync(join(root, "tools/release"), { recursive: true });
     for (const name of ["ci-release.mjs", "lib.mjs"]) {
-      mkdirSync(join(root, "tools/release"), { recursive: true });
       copyFileSync(fileURLToPath(new URL(name, import.meta.url)), join(root, "tools/release", name));
     }
-    put("Cargo.toml", '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "1.0.0"\n');
-    put("CHANGELOG.md", "# Changelog\n\n## [1.0.0] - d\n\n- New.\n\n## [0.1.0] - d\n\n- Old.\n");
-    put("target/release/bundle/nsis/5G Router Band Tuner_1.0.0_x64-setup.exe", "new setup");
-    put("target/release/bundle/msi/5G Router Band Tuner_1.0.0_x64_en-US.msi", "new msi");
-    put("target/release/bundle/nsis/5G Router Band Tuner_0.1.0_x64-setup.exe", "old setup");
-    put("target/release-upload/5G Router Band Tuner_0.1.0_x64-setup.exe", "old setup");
-    put("target/release-upload/5G Router Band Tuner_0.1.0_x64_en-US.msi", "old msi");
-    put("target/release-upload/5G-Router-Band-Tuner-Setup.exe", "old setup");
-    put("target/release-upload/notes.md", "old notes");
-
     const run = spawnSync(process.execPath, [join(root, "tools/release/ci-release.mjs"), "collect"], {
       encoding: "utf8",
     });
-    assert.equal(run.status, 0, run.stderr);
+    check(run, join(root, "target/release-upload"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
-    const out = join(root, "target/release-upload");
+test("the upload folder holds only this version's files, whatever an earlier build left there", () => {
+  // The build folder comes back from the workflow's cache, so it can hold an earlier version's
+  // installers and upload folder. None of that may reach the release.
+  const leftovers = {
+    "target/release/bundle/nsis/5G Router Band Tuner_0.1.0_x64-setup.exe": "old setup",
+    "target/release-upload/5G Router Band Tuner_0.1.0_x64-setup.exe": "old setup",
+    "target/release-upload/5G Router Band Tuner_0.1.0_x64_en-US.msi": "old msi",
+    "target/release-upload/5G-Router-Band-Tuner-Setup.exe": "old setup",
+    "target/release-upload/5G-Router-Band-Tuner-Portable.exe": "old app",
+    "target/release-upload/notes.md": "old notes",
+  };
+  collectIn({ extra: leftovers }, (run, out) => {
+    assert.equal(run.status, 0, run.stderr);
     assert.deepEqual(readdirSync(out).sort(), [
       "5G Router Band Tuner_1.0.0_x64-setup.exe",
       "5G Router Band Tuner_1.0.0_x64_en-US.msi",
+      STABLE_PORTABLE_NAME,
       STABLE_SETUP_NAME,
       "notes.md",
     ]);
@@ -269,9 +304,24 @@ test("the upload folder holds only this version's files, whatever an earlier bui
     const notes = readFileSync(join(out, "notes.md"), "utf8");
     assert.ok(notes.startsWith("## [1.0.0] - d\n\n- New.\n\n### SHA-256\n\n"), notes);
     assert.ok(!notes.includes("0.1.0"), "the notes list an earlier version's file");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  });
+});
+
+test("every release carries the app itself as a portable copy, with its SHA-256 in the notes", () => {
+  collectIn({}, (run, out) => {
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(readFileSync(join(out, STABLE_PORTABLE_NAME), "utf8"), "the app");
+    const sum = createHash("sha256").update("the app").digest("hex");
+    assert.ok(readFileSync(join(out, "notes.md"), "utf8").includes(`- \`${STABLE_PORTABLE_NAME}\`: \`${sum}\`\n`));
+  });
+});
+
+test("a build that left no app exe stops the release: the README's portable link needs it", () => {
+  collectIn({ without: [APP_EXE] }, (run, out) => {
+    assert.notEqual(run.status, 0);
+    assert.match(run.stderr, /router-band-tuner\.exe/);
+    assert.ok(!existsSync(join(out, "notes.md")), "a failed collect must leave nothing to publish");
+  });
 });
 
 test("the upload command names the branch and the one tag, never every tag", () => {

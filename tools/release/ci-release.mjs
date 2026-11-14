@@ -3,8 +3,9 @@
 //   check-tag <tag>   stops the run when the tag isn't the version in the manifests, or the
 //                     changelog has no entry for it
 //   collect           copies the installers to target/release-upload, adds the fixed-name copy
-//                     the README's Download button links to, and writes the release notes
-//                     (the changelog entry and each file's SHA-256) beside them
+//                     the README's Download button links to and the app's own exe as the
+//                     portable copy, and writes the release notes (the changelog entry and
+//                     each file's SHA-256) beside them
 
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -12,10 +13,12 @@ import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  APP_EXE,
   cargoWorkspaceVersion,
   installersFor,
   publishedNotes,
   releaseSection,
+  STABLE_PORTABLE_NAME,
   STABLE_SETUP_NAME,
   stableSetupSource,
   tagMatchesVersion,
@@ -47,6 +50,8 @@ if (mode === "check-tag") {
   if (!built.length) fail(`no installers for ${version} in target/release/bundle`);
   const setup = stableSetupSource(built);
   if (!setup.source) fail(`${setup.problem}: the README's Download button needs exactly one`);
+  const app = join(ROOT, APP_EXE);
+  if (!existsSync(app)) fail(`no ${APP_EXE}: the README's portable link needs the app's own exe`);
 
   // The build folder comes back from the workflow's cache, and with it whatever an earlier build
   // collected: start empty, so only this version's files are uploaded.
@@ -59,6 +64,8 @@ if (mode === "check-tag") {
   };
   for (const f of built) put(f, basename(f));
   put(setup.source, STABLE_SETUP_NAME);
+  // The app's own exe runs without installing: the portable download.
+  put(app, STABLE_PORTABLE_NAME);
   // A trial build of a commit that isn't a release has no changelog entry of its own.
   const notes = publishedNotes(entry ?? `Trial build of version ${version}. Not a release.`, files);
   writeFileSync(join(OUT, "notes.md"), notes);
