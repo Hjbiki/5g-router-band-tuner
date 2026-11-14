@@ -427,9 +427,83 @@ pub struct BuildOptions<'a> {
     pub limit: Option<Limit>,
 }
 
-/// A login exchange, by its path, its query or what it sends. Judged widely on purpose: a wrong
-/// yes only hides values, a wrong no could publish a password's hash. A sent body that never
-/// arrived can't be judged, so it counts as one.
+/// The names a request sends, and what it sends under a name that picks a command.
+#[derive(Default)]
+struct Sent {
+    names: Vec<String>,
+    commands: Vec<String>,
+    /// A body that is neither a form, JSON nor XML: judged as text.
+    unread: String,
+}
+
+/// A name whose value says which command this is: `goformId`, `method`, `action`, `cmd`.
+fn picks_command(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "goform", "cmd", "method", "action", "command", "func", "module", "object",
+    ]
+    .iter()
+    .any(|p| n.contains(p))
+}
+
+fn json_parts(v: &Value, key: &str, sent: &mut Sent) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                sent.names.push(k.clone());
+                json_parts(x, k, sent);
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| json_parts(x, key, sent)),
+        // JSON-RPC names its object and its method in a bare list.
+        Value::String(s) if picks_command(key) || key == "params" => sent.commands.push(s.clone()),
+        _ => {}
+    }
+}
+
+fn sent_parts(x: &Exchange) -> Sent {
+    let mut sent = Sent::default();
+    for (k, v) in &x.query {
+        sent.names.push(k.clone());
+        if picks_command(k) {
+            sent.commands.push(v.clone());
+        }
+    }
+    let Some(body) = x.request_body.as_deref() else {
+        return sent;
+    };
+    if let Some(fields) = form_fields(body, x.request_type.as_deref()) {
+        for (k, v) in fields {
+            if let (true, Some(v)) = (picks_command(&k), v.as_str()) {
+                sent.commands.push(v.to_string());
+            }
+            sent.names.push(k);
+        }
+    } else if let Ok(v) = serde_json::from_str::<Value>(body) {
+        json_parts(&v, "", &mut sent);
+    } else if body.trim_start().starts_with('<') {
+        // Element names are enough: what an element holds is judged by the redactor.
+        for tag in body.split('<').skip(1) {
+            let name: String = tag
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || "_:.-".contains(*c))
+                .collect();
+            if !name.is_empty() {
+                sent.names.push(name);
+            }
+        }
+    } else {
+        sent.unread = body.to_string();
+    }
+    sent
+}
+
+/// A login exchange. Judged widely on purpose: a wrong yes only hides values, a wrong no could
+/// publish a password's hash. It is judged by the path, by the *names* the request sends, and by
+/// the command it picks, never by the other values: a status poll that asks for a field called
+/// `loginfo` is not a login, and a band command that carries a token is not one either (the
+/// token is hidden by its own name). A sent body that never arrived can't be judged, so it counts
+/// as a login.
 fn login_shaped(x: &Exchange) -> bool {
     const IN_PATH: &[&str] = &[
         "login",
@@ -450,7 +524,7 @@ fn login_shaped(x: &Exchange) -> bool {
         "publickey",
         "captcha",
     ];
-    const IN_BODY: &[&str] = &[
+    const IN_NAME: &[&str] = &[
         "pass",
         "pwd",
         "psw",
@@ -468,10 +542,16 @@ fn login_shaped(x: &Exchange) -> bool {
         "digest",
         "secret",
         "otp",
-        "token",
     ];
-    // A field named just `pw`, in a form, JSON or XML.
-    const PW_FIELD: &[&str] = &["pw=", "\"pw\"", "<pw>"];
+    const IN_COMMAND: &[&str] = &[
+        "login",
+        "logon",
+        "signin",
+        "sign_in",
+        "auth",
+        "passw",
+        "challenge",
+    ];
     if x.request_body_missing {
         return true;
     }
@@ -479,15 +559,18 @@ fn login_shaped(x: &Exchange) -> bool {
     if IN_PATH.iter().any(|w| path.contains(w)) {
         return true;
     }
-    let mut sent = x.request_body.clone().unwrap_or_default();
-    for (k, v) in &x.query {
-        sent.push_str(k);
-        sent.push(' ');
-        sent.push_str(v);
-        sent.push(' ');
-    }
-    let sent = sent.to_ascii_lowercase();
-    IN_BODY.iter().chain(PW_FIELD).any(|w| sent.contains(w))
+    let sent = sent_parts(x);
+    let named = sent.names.iter().any(|name| {
+        let n = name.to_ascii_lowercase();
+        n == "pw" || IN_NAME.iter().any(|w| n.contains(w))
+    });
+    // A list of field names (`cmd=rsrp,loginfo`) asks for readings; one word picks a command.
+    let picked = sent.commands.iter().filter(|c| !c.contains(',')).any(|c| {
+        let c = c.to_ascii_lowercase();
+        IN_COMMAND.iter().any(|w| c.contains(w))
+    });
+    let unread = sent.unread.to_ascii_lowercase();
+    named || picked || IN_NAME.iter().chain(IN_COMMAND).any(|w| unread.contains(w))
 }
 
 /// `a=1&b=2`, by its declared type or by its look. XML and JSON are read as what they are
@@ -1976,7 +2059,6 @@ mod tests {
             r#"{"otp":"0f1e2d3c4b5a69788796a5b4c3d2e1f2"}"#,
             r#"{"auth":"0f1e2d3c4b5a69788796a5b4c3d2e1f3"}"#,
             r#"{"secret":"0f1e2d3c4b5a69788796a5b4c3d2e1f4"}"#,
-            r#"{"x_token":"0f1e2d3c4b5a69788796a5b4c3d2e1f5"}"#,
         ];
         for (i, body) in bodies.iter().enumerate() {
             let request = json!({ "postData": body });
@@ -2206,5 +2288,315 @@ mod tests {
         );
         let (_, v) = built(rec, &opts());
         assert_eq!(v["exchanges"][0]["query"]["cmd"], json!(list));
+    }
+
+    // ---- Usefulness: a real recording must still tell a driver's author what they need ----
+
+    /// A GET the page made by itself, and the router's answer.
+    fn poll(rec: &mut Recorder, id: &str, url: &str, mime: &str, body: &str) {
+        exchange(rec, id, "GET", url, "XHR", json!({}), mime, body);
+    }
+
+    /// A POST the page made by itself, and the router's answer.
+    fn post(rec: &mut Recorder, id: &str, url: &str, request: Value, mime: &str, body: &str) {
+        exchange(rec, id, "POST", url, "XHR", request, mime, body);
+    }
+
+    #[test]
+    fn a_huawei_style_recording_keeps_its_login_shape_its_readings_and_its_band_command() {
+        let mut rec = recorder();
+        let login = json!({
+            "postData": "<request><username>admin</username><firstnonce>abcdef0123456789</firstnonce><mode>1</mode></request>",
+            "headers": { "__RequestVerificationToken": "TOKENVALUE123456" },
+        });
+        post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/user/challenge_login",
+            login,
+            "text/xml",
+            "<response><salt>aa11bb22</salt><iterations>100</iterations><servernonce>bb22cc33dd44ee55</servernonce></response>",
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/device/signal",
+            "text/xml",
+            "<response><pci>140</pci><cell_id>123456789</cell_id><rsrq>-11.0dB</rsrq><rsrp>-95dBm</rsrp>\
+             <rssi>-63dBm</rssi><sinr>12dB</sinr><band>3</band><mode>7</mode><nrrsrp>-101dBm</nrrsrp></response>",
+        );
+        // jQuery calls the XML it posts a form.
+        let set = json!({
+            "postData": "<request><NetworkMode>03</NetworkMode><NetworkBand>3FFFFFFF</NetworkBand><LTEBand>800C5</LTEBand></request>",
+            "headers": {
+                "__RequestVerificationToken": "TOKENVALUE654321",
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            },
+        });
+        post(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/api/net/net-mode",
+            set,
+            "text/xml",
+            "<response>OK</response>",
+        );
+        poll(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/api/net/net-mode",
+            "text/xml",
+            "<error><code>125002</code><message></message></error>",
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"];
+        assert_eq!(x[0]["login"], json!(true));
+        assert!(x[0]["request"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("<firstnonce>{HIDDEN}</firstnonce>")));
+        assert!(
+            x[1].get("login").is_none()
+                && x[2].get("login").is_none()
+                && x[3].get("login").is_none()
+        );
+        assert_eq!(x[1]["path"], json!("/api/device/signal"));
+        let signal = x[1]["response"].as_str().unwrap();
+        for kept in [
+            "<rsrq>-11.0dB</rsrq>",
+            "<rsrp>-95dBm</rsrp>",
+            "<rssi>-63dBm</rssi>",
+            "<sinr>12dB</sinr>",
+            "<band>3</band>",
+            "<mode>7</mode>",
+            "<nrrsrp>-101dBm</nrrsrp>",
+        ] {
+            assert!(signal.contains(kept), "{kept} is missing from {signal}");
+        }
+        assert_eq!(x[2]["path"], json!("/api/net/net-mode"));
+        assert_eq!(
+            x[2]["request"],
+            json!("<request><NetworkMode>03</NetworkMode><NetworkBand>3FFFFFFF</NetworkBand><LTEBand>800C5</LTEBand></request>")
+        );
+        assert!(x[2]["requestHeaders"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("__RequestVerificationToken")));
+        assert_eq!(x[2]["response"], json!("<response>OK</response>"));
+        assert!(x[3]["response"]
+            .as_str()
+            .unwrap()
+            .contains("<code>125002</code>"));
+        for gone in [
+            "TOKENVALUE",
+            "abcdef0123456789",
+            "bb22cc33dd44ee55",
+            "aa11bb22",
+            "123456789",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+    }
+
+    #[test]
+    fn a_zte_style_recording_keeps_its_polls_and_its_band_command() {
+        let mut rec = recorder();
+        // The status poll asks for `loginfo` among its fields. It is not a login.
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/goform/goform_get_cmd_process?isTest=false&cmd=modem_main_state%2Cloginfo%2Cnetwork_type%2Clte_rsrp%2CZ5g_rsrp%2Cwan_active_band&multi_data=1&_=1794668197719",
+            "application/json",
+            r#"{"modem_main_state":"modem_init_complete","loginfo":"ok","network_type":"ENDC","lte_rsrp":"-97","Z5g_rsrp":"-101","wan_active_band":"LTE BAND 3"}"#,
+        );
+        let form = |body: &str| json!({ "postData": body, "headers": { "Content-Type": "application/x-www-form-urlencoded" } });
+        post(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/goform/goform_set_cmd_process",
+            form("isTest=false&goformId=LOGIN&password=QWRtaW4xMjM0NTY3OA%3D%3D"),
+            "application/json",
+            r#"{"result":"0"}"#,
+        );
+        post(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/goform/goform_set_cmd_process",
+            form("isTest=false&goformId=SET_LTE_BAND_LOCK&lte_band_lock=800C5&AD=0F1E2D3C4B5A69788796A5B4C3D2E1F0"),
+            "application/json",
+            r#"{"result":"success"}"#,
+        );
+        // A read that carries an anti-forgery token is still a read.
+        poll(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/goform/goform_get_cmd_process?cmd=lte_rsrp&csrf_token=0f1e2d3c4b5a6978",
+            "application/json",
+            r#"{"lte_rsrp":"-98"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"];
+        assert!(
+            x[0].get("login").is_none(),
+            "the status poll was taken for a login"
+        );
+        assert_eq!(
+            x[0]["query"]["cmd"],
+            json!("modem_main_state,loginfo,network_type,lte_rsrp,Z5g_rsrp,wan_active_band")
+        );
+        let status = &x[0]["response"];
+        assert_eq!(status["modem_main_state"], json!("modem_init_complete"));
+        assert_eq!(status["network_type"], json!("ENDC"));
+        assert_eq!(
+            (&status["lte_rsrp"], &status["Z5g_rsrp"]),
+            (&json!("-97"), &json!("-101"))
+        );
+        assert_eq!(status["wan_active_band"], json!("LTE BAND 3"));
+        assert_eq!(x[1]["login"], json!(true));
+        assert_eq!(x[1]["request"]["password"], json!(HIDDEN));
+        assert!(
+            x[2].get("login").is_none(),
+            "the band command was taken for a login"
+        );
+        assert_eq!(x[2]["path"], json!("/goform/goform_set_cmd_process"));
+        assert_eq!(x[2]["request"]["goformId"], json!("SET_LTE_BAND_LOCK"));
+        assert_eq!(x[2]["request"]["lte_band_lock"], json!("800C5"));
+        assert_eq!(x[2]["response"]["result"], json!("success"));
+        assert!(
+            x[3].get("login").is_none(),
+            "a read with a token was taken for a login"
+        );
+        assert_eq!(x[3]["response"]["lte_rsrp"], json!("-98"));
+        for gone in [
+            "QWRtaW4xMjM0NTY3OA",
+            "0F1E2D3C4B5A69788796A5B4C3D2E1F0",
+            "0f1e2d3c4b5a6978",
+            "1794668197719",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+    }
+
+    #[test]
+    fn a_ubus_style_recording_keeps_its_calls_and_its_readings() {
+        let mut rec = recorder();
+        let call = |params: &str| json!({ "postData": format!(r#"{{"jsonrpc":"2.0","id":1,"method":"call","params":{params}}}"#) });
+        post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/ubus/",
+            call(
+                r#"["00000000000000000000000000000000","zwrt_web","web_login",{"password":"5F4DCC3B5AA765D61D8327DEB882CF99"}]"#,
+            ),
+            "application/json",
+            r#"{"jsonrpc":"2.0","id":1,"result":[0,{"ubus_rpc_session":"9f8e7d6c5b4a39281706f5e4d3c2b1a0"}]}"#,
+        );
+        // A login whose arguments have names that say nothing: the method's name says it.
+        post(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/ubus/",
+            call(
+                r#"["00000000000000000000000000000000","session","login",{"u":"root","p":"0a1b2c3d4e5f6071"}]"#,
+            ),
+            "application/json",
+            r#"{"jsonrpc":"2.0","id":1,"result":[0,{"sid":"8e7d6c5b4a39281706f5e4d3c2b1a09f"}]}"#,
+        );
+        post(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/ubus/",
+            call(
+                r#"["9f8e7d6c5b4a39281706f5e4d3c2b1a0","zwrt_router.api","router_get_status",{}]"#,
+            ),
+            "application/json",
+            r#"{"jsonrpc":"2.0","id":1,"result":[0,{"network_type":"5G NSA","lte_rsrp":"-97","nr5g_rsrp":"-101","lte_band":"3"}]}"#,
+        );
+        post(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/ubus/",
+            call(
+                r#"["9f8e7d6c5b4a39281706f5e4d3c2b1a0","zwrt_nwinfo.api","nwinfo_set_netselect",{"net_select_mode":"manual_select","lte_band_lock":"800C5"}]"#,
+            ),
+            "application/json",
+            r#"{"jsonrpc":"2.0","id":1,"result":[0]}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"];
+        assert_eq!(
+            (&x[0]["login"], &x[1]["login"]),
+            (&json!(true), &json!(true))
+        );
+        assert!(x[2].get("login").is_none() && x[3].get("login").is_none());
+        let read = &x[2]["request"]["params"];
+        assert_eq!(
+            (&read[1], &read[2]),
+            (&json!("zwrt_router.api"), &json!("router_get_status"))
+        );
+        let status = &x[2]["response"]["result"][1];
+        assert_eq!(status["network_type"], json!("5G NSA"));
+        assert_eq!(
+            (&status["lte_rsrp"], &status["nr5g_rsrp"]),
+            (&json!("-97"), &json!("-101"))
+        );
+        assert_eq!(status["lte_band"], json!("3"));
+        let set = &x[3]["request"]["params"];
+        assert_eq!(
+            (&set[1], &set[2]),
+            (&json!("zwrt_nwinfo.api"), &json!("nwinfo_set_netselect"))
+        );
+        assert_eq!(set[3]["net_select_mode"], json!("manual_select"));
+        assert_eq!(set[3]["lte_band_lock"], json!("800C5"));
+        for gone in [
+            "5F4DCC3B5AA765D61D8327DEB882CF99",
+            "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
+            "0a1b2c3d4e5f6071",
+            "8e7d6c5b4a39281706f5e4d3c2b1a09f",
+        ] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+    }
+
+    #[test]
+    fn a_token_field_alone_is_hidden_without_hiding_the_rest() {
+        let mut rec = recorder();
+        post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/x",
+            json!({ "postData": r#"{"x_token":"0f1e2d3c4b5a69788796a5b4c3d2e1f5","lte_band":"3"}"# }),
+            "application/json",
+            r#"{"result":"aabbccdd00112233","band":"3"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"][0];
+        assert!(x.get("login").is_none());
+        assert_eq!(x["request"]["x_token"], json!(HIDDEN));
+        assert_eq!(x["request"]["lte_band"], json!("3"));
+        assert_eq!(x["response"]["band"], json!("3"));
+        // A token handed back under a state's name isn't one word of a state.
+        assert!(!text.contains("0f1e2d3c4b5a6978") && !text.contains("aabbccdd00112233"));
+    }
+
+    #[test]
+    fn a_version_or_a_band_cannot_carry_a_long_number() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/device/information",
+            "text/xml",
+            "<response><SoftwareVersion>356789012345678</SoftwareVersion><LTEBand>356789012345679</LTEBand>\
+             <NetworkBand>3FFFFFFF</NetworkBand><WebUIVersion>11.0.2.21(H057SP5C983)</WebUIVersion></response>",
+        );
+        let (text, v) = built(rec, &opts());
+        assert!(!text.contains("356789012345678") && !text.contains("356789012345679"));
+        let xml = v["exchanges"][0]["response"].as_str().unwrap();
+        assert!(xml.contains("<NetworkBand>3FFFFFFF</NetworkBand>"), "{xml}");
+        assert!(
+            xml.contains("<WebUIVersion>11.0.2.21(H057SP5C983)</WebUIVersion>"),
+            "{xml}"
+        );
     }
 }

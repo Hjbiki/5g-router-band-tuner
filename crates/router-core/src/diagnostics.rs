@@ -176,6 +176,10 @@ const CAPTURE_SENSITIVE_PARTS: &[&str] = &[
     "ecgi",
     "scrambling",
     "unlock",
+    "verif",
+    "security",
+    "activat",
+    "postal",
 ];
 /// The same, as whole words of a name (`cellId` is `cell` and `id`), where the word alone would
 /// match too much as a part. The plurals name lists of people's devices.
@@ -218,6 +222,8 @@ const CAPTURE_SENSITIVE_WORDS: &[&str] = &[
     "label",
     "login",
     "auth",
+    "zip",
+    "otp",
 ];
 /// Names of readings and of what the router is: their values are kept when they read like one.
 const CAPTURE_READING_PARTS: &[&str] = &[
@@ -259,14 +265,36 @@ const CAPTURE_STATE_PARTS: &[&str] = &[
     "command", "method", "action", "jsonrpc",
 ];
 const CAPTURE_STATE_WORDS: &[&str] = &[
-    "type", "cmd", "error", "errno", "errcode", "ret", "retcode", "func", "module", "object",
-    "lock",
+    "type", "cmd", "code", "error", "errno", "errcode", "ret", "retcode", "response", "func",
+    "module", "object", "lock",
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Keep {
     Reading,
     State,
+}
+
+/// Why a value is hidden, which decides whether the leak scan remembers it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Hide {
+    /// Its own name is sensitive: always remembered.
+    Named,
+    /// It sits under a sensitive name or in a login: remembered unless it is an ordinary word.
+    /// A list of devices says "Wireless", and a login says "session"; remembering those would
+    /// stop every save in which the same word is a field's name.
+    Inside,
+    /// Its name just isn't on the capture's keep list: remembered for the check of included code
+    /// only, and only when it isn't an ordinary word.
+    Unlisted,
+}
+
+/// A word anyone might write: letters, with `_`, `.`, `-` or a space between them. A password,
+/// a token, an address or a device with a number in its name is not one.
+fn ordinary_word(s: &str) -> bool {
+    s.len() <= 24
+        && s.chars()
+            .all(|c| c.is_ascii_alphabetic() || "_.- ".contains(c))
 }
 
 /// A name's words, lowercased: split at anything that isn't a letter or digit, where a small
@@ -366,13 +394,19 @@ fn plain_value(s: &str) -> bool {
 
 /// One word of a state: a number, letters in one case, or words joined by `_` or `-`.
 fn state_word(s: &str) -> bool {
-    let numeric = s.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c));
+    let digits = s.bytes().filter(u8::is_ascii_digit).count();
+    // A code is short. A long number under a state's name is more likely a session.
+    let numeric = s.len() <= 8 && s.chars().all(|c| c.is_ascii_digit() || "+-.".contains(c));
     let wordy = s
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     let mixed =
         s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase());
-    !s.is_empty() && s.len() <= NAME_MAX && (numeric || (wordy && (s.contains('_') || !mixed)))
+    // A token handed back as a "result" has digits all through it.
+    let random = s.len() >= 12 && digits >= 4;
+    !s.is_empty()
+        && s.len() <= NAME_MAX
+        && (numeric || (wordy && !random && (s.contains('_') || !mixed)))
 }
 
 /// `rsrp,sinr,lte_band`: the field names a command asks for.
@@ -508,24 +542,38 @@ impl Redactor {
 
     /// A synthetic value shaped like `value` (redact-har.mjs `synthLike`). Empty stays empty.
     pub fn value(&mut self, value: &str, label: &str) -> String {
-        self.stand_in(value, label, true)
+        self.stand_in(value, label, Hide::Named)
     }
 
-    /// `secret` is false for a value hidden only because its name isn't on the capture's keep
-    /// list. It is replaced all the same, but an ordinary word like "connected" must not make the
-    /// leak scan stop the save when a kept field says the same word.
-    fn stand_in(&mut self, value: &str, label: &str, secret: bool) -> String {
+    /// Whether a value under this name is remembered for the leak scan whatever it says. The
+    /// app's own reads always were; under the stricter rules it takes a sensitive name.
+    fn named(&self, name: &str) -> Hide {
+        if self.rules == Rules::Diagnostics || capture_sensitive(name) {
+            Hide::Named
+        } else {
+            Hide::Inside
+        }
+    }
+
+    /// Replaces a value. `hide` says why, which decides what the leak scan remembers of it.
+    fn stand_in(&mut self, value: &str, label: &str, hide: Hide) -> String {
         if value.is_empty() {
             return String::new();
         }
-        if secret {
-            self.secrets.insert(value.to_string());
-        } else if value.len() >= SOFT_MIN
-            && !value.chars().all(|c| c.is_ascii_lowercase() || c == '_')
-        {
-            // An ordinary small word ("connected") is in every script; a name or a number isn't.
-            self.soft.insert(value.to_string());
+        let ordinary = ordinary_word(value);
+        match hide {
+            Hide::Named => {
+                self.secrets.insert(value.to_string());
+            }
+            Hide::Inside if !ordinary => {
+                self.secrets.insert(value.to_string());
+            }
+            Hide::Unlisted if !ordinary && value.len() >= SOFT_MIN => {
+                self.soft.insert(value.to_string());
+            }
+            _ => {}
         }
+        let secret = hide != Hide::Unlisted;
         if self.rules == Rules::ShapeOnly || (secret && self.rules == Rules::Capture) {
             return HIDDEN.to_string();
         }
@@ -599,7 +647,12 @@ impl Redactor {
                 Event::Text(t)
                     if (secret || unlisted) && !t.iter().all(u8::is_ascii_whitespace) =>
                 {
-                    let fake = self.stand_in(&String::from_utf8_lossy(&t), &at, secret);
+                    let hide = if secret {
+                        self.named(&inside)
+                    } else {
+                        Hide::Unlisted
+                    };
+                    let fake = self.stand_in(&String::from_utf8_lossy(&t), &at, hide);
                     Event::Text(BytesText::from_escaped(fake))
                 }
                 Event::Text(t) if strict && !t.iter().all(u8::is_ascii_whitespace) => {
@@ -608,7 +661,12 @@ impl Redactor {
                 }
                 // Under the stricter rules CDATA is free text wherever it sits.
                 Event::CData(c) if secret || strict => {
-                    let fake = self.stand_in(&String::from_utf8_lossy(&c), &at, secret);
+                    let hide = if secret {
+                        self.named(&inside)
+                    } else {
+                        Hide::Unlisted
+                    };
+                    let fake = self.stand_in(&String::from_utf8_lossy(&c), &at, hide);
                     Event::Text(BytesText::from_escaped(fake))
                 }
                 Event::Comment(_) | Event::DocType(_) | Event::PI(_) => continue,
@@ -642,8 +700,12 @@ impl Redactor {
             let at = format!("{label}:{name}@{key}");
             let value = if hide || self.hides(&key) {
                 let raw = String::from_utf8_lossy(&attr.value).into_owned();
-                let secret = hide || self.sensitive(&key);
-                Cow::Owned(self.stand_in(&raw, &at, secret).into_bytes())
+                let why = if hide || self.sensitive(&key) {
+                    self.named(&key)
+                } else {
+                    Hide::Unlisted
+                };
+                Cow::Owned(self.stand_in(&raw, &at, why).into_bytes())
             } else if self.rules != Rules::Diagnostics {
                 let raw = String::from_utf8_lossy(&attr.value).into_owned();
                 Cow::Owned(self.kept(&raw, &key, &at, true).into_bytes())
@@ -711,7 +773,7 @@ impl Redactor {
                     let red = if ubus && k == "params" {
                         self.ubus_params(x, &l)
                     } else if self.sensitive(k) {
-                        self.leaf_json(x, &l)
+                        self.leaf_json(x, &l, k)
                     } else {
                         self.json_at(x, &l, k)
                     };
@@ -728,12 +790,14 @@ impl Redactor {
             Value::String(s) => Value::String(match self.rules {
                 Rules::Diagnostics => self.xml(s, label),
                 _ if !self.hides(key) => self.kept(s, key, label, false),
-                _ => self.stand_in(s, label, false),
+                _ => self.stand_in(s, label, Hide::Unlisted),
             }),
             Value::Number(n) if self.rules != Rules::Diagnostics => {
                 let text = n.to_string();
-                if self.hides(key) || !identifier_hits(&text).is_empty() {
-                    let fake = self.stand_in(&text, label, false);
+                // A state's code is short, as a number too.
+                let long_state = keep_class(key) == Some(Keep::State) && text.len() > 8;
+                if self.hides(key) || long_state || !identifier_hits(&text).is_empty() {
+                    let fake = self.stand_in(&text, label, Hide::Unlisted);
                     fake.parse::<u64>()
                         .map(Value::from)
                         .unwrap_or(Value::String(fake))
@@ -749,15 +813,15 @@ impl Redactor {
     /// session is a secret, and the object and the method are what a driver needs to read.
     fn ubus_params(&mut self, params: &Value, label: &str) -> Value {
         let Some([session, object, method, args]) = params.as_array().map(Vec::as_slice) else {
-            return self.leaf_json(params, label);
+            return self.leaf_json(params, label, "params");
         };
         let name = |red: &mut Self, v: &Value, at: &str| match v.as_str() {
             Some(s) if ubus_name(s) => Value::String(s.to_string()),
-            Some(s) => Value::String(red.stand_in(s, at, false)),
+            Some(s) => Value::String(red.stand_in(s, at, Hide::Unlisted)),
             None => Value::Null,
         };
         Value::Array(vec![
-            self.leaf_json(session, &format!("{label}[0]")),
+            self.leaf_json(session, &format!("{label}[0]"), "session"),
             name(self, object, &format!("{label}[1]")),
             name(self, method, &format!("{label}[2]")),
             self.json_at(args, &format!("{label}[3]"), ""),
@@ -775,40 +839,53 @@ impl Redactor {
         }
         let state = keep_class(name) == Some(Keep::State);
         if !text.is_ascii() || !plain_value(text) || (state && !state_word(text)) {
-            return self.stand_in(text, label, false);
+            return self.stand_in(text, label, Hide::Unlisted);
         }
-        // The leak scan lets a version and a band mask through by their XML name. Here they must
-        // also be under a version's own name, or look like a mask.
-        let mask = text
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || "x, ".contains(c));
-        let band = name.to_ascii_lowercase().ends_with("band");
-        if xml_leaf && (version_name(name) || (band && mask)) {
+        // The leak scan lets a version and a band mask through by their XML name, unseen. So
+        // here a version must be under a version's own name and read like one (it may look like
+        // an IPv4 address, nothing else), and a mask must be a short run of hex digits (twelve of
+        // them look like a MAC, nothing else).
+        let hits = identifier_hits(text);
+        let only = |kind: &str| hits.iter().all(|hit| hit.contains(kind));
+        let version = version_name(name) && crate::probe::is_plain_label(text) && only("IPv4");
+        let mask = text.len() <= 32
+            && text
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || "x, ".contains(c));
+        let band = name.to_ascii_lowercase().ends_with("band") && mask && only("MAC");
+        if xml_leaf && (version || band) {
             return text.to_string();
         }
         redact_identifier_tokens(text).0
     }
 
-    fn leaf_json(&mut self, v: &Value, label: &str) -> Value {
+    /// Everything under a sensitive name. `key` is the name a value sits under itself.
+    fn leaf_json(&mut self, v: &Value, label: &str, key: &str) -> Value {
         match v {
             Value::Number(n) => {
-                let fake = self.value(&n.to_string(), label);
+                let why = self.named(key);
+                let fake = self.stand_in(&n.to_string(), label, why);
                 fake.parse::<u64>()
                     .map(Value::from)
                     .unwrap_or(Value::String(fake))
             }
-            Value::String(s) => Value::String(self.value(s, label)),
+            Value::String(s) => {
+                let why = self.named(key);
+                Value::String(self.stand_in(s, label, why))
+            }
             Value::Null | Value::Bool(_) => v.clone(),
             // A nested object under a sensitive key: redact every scalar inside it.
             Value::Object(m) => {
                 let mut out = Map::new();
                 for (k, x) in m {
-                    let red = self.leaf_json(x, &format!("{label}.{k}"));
+                    let red = self.leaf_json(x, &format!("{label}.{k}"), k);
                     out.insert(self.name(k), red);
                 }
                 Value::Object(out)
             }
-            Value::Array(a) => Value::Array(a.iter().map(|x| self.leaf_json(x, label)).collect()),
+            Value::Array(a) => {
+                Value::Array(a.iter().map(|x| self.leaf_json(x, label, key)).collect())
+            }
         }
     }
 
