@@ -15,8 +15,13 @@ automatic tests), UI in
 
 - Every request is made by the Rust backend (`reqwest` with rustls). The webview's CSP is
   unchanged and still allows nothing remote.
-- A test is refused while a band change is open (safe-apply phase other than idle, committed or
-  reverted): the router is re-attaching then and the result would mean nothing.
+- A test is refused while a band change is being applied, checked or undone: the router is
+  re-attaching then and the result would mean nothing. A test you start yourself is allowed in
+  the trial of the change, when the new bands are in place: measuring them is how you decide
+  between **Keep these bands** and **Revert now**, and the banner offers **Test the speed**.
+  The trial's clock keeps running during the test, and **Revert now** stops the test. In a
+  two-step apply only the trial of the second step counts, since the first step is the primary
+  band alone. Automatic tests still wait until the change has ended.
 - A test does not need a router login (it measures the internet, not the router), but it always
   records what was serving at the start, taken from the latest router snapshot: LTE band, PCI
   and EARFCN, whether carrier aggregation was active, and the NR band, PCI and NR-ARFCN.
@@ -85,6 +90,12 @@ as an option. Nothing is downloaded until you pick Ookla **and** accept its term
   test is measured with Cloudflare and the result says so ("Measured with Cloudflare because …"). A
   run that started and then failed or timed out is reported as a failure, so a second test doesn't
   use more data.
+- **A run that stops during its upload** keeps what it had measured: the idle ping and the
+  download, taken from the CLI's interim lines once the download has finished. A test you
+  started shows them as a result with the upload marked "not measured"; it is saved, and it
+  is left out of every average and ranking. During an auto-scan or an automatic test the stop
+  still counts as a failure, so the scan retries. The stop and the CLI's last error or warning
+  go to the event log.
 
 #### Ookla's terms (summary, not legal advice)
 

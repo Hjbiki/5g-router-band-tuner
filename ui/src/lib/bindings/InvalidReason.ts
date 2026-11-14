@@ -3,4 +3,4 @@
 /**
  * Why a finished result doesn't describe one band config.
  */
-export type InvalidReason = "bandChange" | "servingChanged" | "ipChanged" | "apnChange";
+export type InvalidReason = "bandChange" | "servingChanged" | "ipChanged" | "apnChange" | "incomplete";

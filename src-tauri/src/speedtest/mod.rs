@@ -137,6 +137,9 @@ pub enum InvalidReason {
     IpChanged,
     /// An APN switch opened, or the APN in use changed, during the test.
     ApnChange,
+    /// The test stopped before every part was measured: the upload is missing. What it did
+    /// measure is shown, and never counted in an average or a ranking.
+    Incomplete,
 }
 
 /// What started a test.
@@ -376,6 +379,19 @@ pub fn band_change_open(sa: &SafeApplyView) -> bool {
         )
 }
 
+/// A band change that a test the user starts may not run in: any open change except the trial
+/// of its last step. In that trial the new bands are in place and only being watched, and a
+/// test there is how the user decides whether to keep them. Step 1 of a two-step apply is the
+/// primary band alone, not the set that was asked for, so its trial doesn't count. Automatic
+/// tests, the scan and everything else keep using `band_change_open`.
+pub fn change_blocks_test(sa: &SafeApplyView) -> bool {
+    if !band_change_open(sa) {
+        return false;
+    }
+    let last_step = sa.sequence.as_ref().is_none_or(|q| q.step >= q.total);
+    !(sa.phase == Phase::Probation && last_step)
+}
+
 /// A Refresh IP run is open: mobile data goes off and on, so nothing may measure or change
 /// the bands meanwhile.
 pub fn ip_refresh_active(s: &AppSnapshot) -> bool {
@@ -394,7 +410,7 @@ pub fn apn_change_open(s: &AppSnapshot) -> bool {
 
 /// Why a test can't start from this snapshot: a band change, a Refresh IP run or an APN switch.
 pub fn start_refusal(s: &AppSnapshot) -> Option<&'static str> {
-    if band_change_open(&s.safe_apply) {
+    if change_blocks_test(&s.safe_apply) {
         Some(ERR_BUSY)
     } else if ip_refresh_active(s) {
         Some(router_core::IP_REFRESH_RUNNING)
@@ -467,7 +483,8 @@ pub fn invalid_reason(start: &Baseline, end: Option<&AppSnapshot>) -> Option<Inv
         (&start.config, &end.config),
         (Some(a), Some(b)) if a != b
     );
-    if band_change_open(&end.safe_apply) || config_changed {
+    // A test that ends in the trial of the bands it started on measured those bands.
+    if change_blocks_test(&end.safe_apply) || config_changed {
         return Some(InvalidReason::BandChange);
     }
     let apn_moved = matches!(
@@ -515,6 +532,8 @@ impl Default for Endpoints {
 
 pub enum Outcome {
     Done(Box<SpeedTestResult>),
+    /// The provider stopped after its download: what it measured, and why it stopped.
+    Partial(Box<SpeedTestResult>, String),
     Cancelled,
     /// Why, and the technical cause for the message.
     Failed(FailReason, String),
@@ -536,7 +555,7 @@ fn ookla_fallback(
         ookla::OoklaError::Install(d) | ookla::OoklaError::NotStarted(d) => {
             Ok((FallbackReason::InstallFailed, Some(d)))
         }
-        ookla::OoklaError::Failed(d) => Err((
+        ookla::OoklaError::Failed(d) | ookla::OoklaError::Partial { detail: d, .. } => Err((
             FailReason::Ookla,
             format!("Ookla Speedtest stopped without a result: {d}"),
         )),
@@ -551,17 +570,9 @@ fn ookla_fallback(
     }
 }
 
-/// Runs one test with the chosen provider. Ookla falls back to Cloudflare only when the CLI
-/// never measured; a run that started and failed is reported as a failure.
-pub async fn run_test(
-    cfg: SpeedTestSettings,
-    serving: ServingCell,
-    data_dir: &Path,
-    ep: &Endpoints,
-    cancel: watch::Receiver<bool>,
-    emit: &(dyn Fn(SpeedTestEvent) + Send + Sync),
-) -> Outcome {
-    let mut result = SpeedTestResult {
+/// A result with nothing measured yet.
+fn blank_result(cfg: SpeedTestSettings, serving: ServingCell) -> SpeedTestResult {
+    SpeedTestResult {
         at_ms: now_ms(),
         provider: SpeedTestProvider::Cloudflare,
         requested: cfg.provider,
@@ -581,7 +592,48 @@ pub async fn run_test(
         allowed_bands: None,
         source: None,
         ip_range: None,
-    };
+    }
+}
+
+/// Puts what the Ookla CLI measured into a result.
+fn take_ookla(result: &mut SpeedTestResult, m: ookla::OoklaMeasured) {
+    result.provider = SpeedTestProvider::Ookla;
+    result.idle_ping_ms = m.idle_ping_ms;
+    result.download_mbps = m.download_mbps;
+    result.upload_mbps = m.upload_mbps;
+    result.ping_down_ms = m.ping_down_ms;
+    result.ping_up_ms = m.ping_up_ms;
+    result.bytes_used = m.bytes_used;
+    result.server = m.server;
+    // The CLI picks its own amount of data.
+    result.size_applies = Some(false);
+}
+
+/// The mark on a result that lacks its upload: a reason that already applies (the bands
+/// changed mid-test, say) stays, otherwise it is `Incomplete`. Either way it never counts.
+fn partial_invalid_reason(found: Option<InvalidReason>) -> Option<InvalidReason> {
+    found.or(Some(InvalidReason::Incomplete))
+}
+
+/// Whether a result without its upload is shown as a result. A test the user pressed shows
+/// what it measured; a scan or an automatic test needs a whole result, so it reports the stop
+/// and retries or skips as it does for any failure.
+fn partial_is_shown(source: SpeedTestSource) -> bool {
+    source == SpeedTestSource::Manual
+}
+
+/// Runs one test with the chosen provider. Ookla falls back to Cloudflare only when the CLI
+/// never measured; a run that started and failed is reported as a failure, and one that
+/// stopped after its download keeps what it measured (`Outcome::Partial`).
+pub async fn run_test(
+    cfg: SpeedTestSettings,
+    serving: ServingCell,
+    data_dir: &Path,
+    ep: &Endpoints,
+    cancel: watch::Receiver<bool>,
+    emit: &(dyn Fn(SpeedTestEvent) + Send + Sync),
+) -> Outcome {
+    let mut result = blank_result(cfg, serving);
     let progress = |phase, fraction, bytes_used, live: &Live| {
         emit(SpeedTestEvent::Progress(SpeedTestProgress {
             phase,
@@ -597,20 +649,21 @@ pub async fn run_test(
         } else {
             match run_ookla(data_dir, ep, cancel.clone(), &progress).await {
                 Ok(m) => {
-                    result.provider = SpeedTestProvider::Ookla;
-                    result.idle_ping_ms = m.idle_ping_ms;
-                    result.download_mbps = m.download_mbps;
-                    result.upload_mbps = m.upload_mbps;
-                    result.ping_down_ms = m.ping_down_ms;
-                    result.ping_up_ms = m.ping_up_ms;
-                    result.bytes_used = m.bytes_used;
-                    result.server = m.server;
-                    // The CLI picks its own amount of data.
-                    result.size_applies = Some(false);
-                    progress(SpeedPhase::Done, 1.0, m.bytes_used, &Live::default());
+                    let bytes = m.bytes_used;
+                    take_ookla(&mut result, m);
+                    progress(SpeedPhase::Done, 1.0, bytes, &Live::default());
                     return Outcome::Done(Box::new(result));
                 }
                 Err(ookla::OoklaError::Cancelled) => return Outcome::Cancelled,
+                Err(ookla::OoklaError::Partial { measured, detail }) => {
+                    let bytes = measured.bytes_used;
+                    take_ookla(&mut result, *measured);
+                    progress(SpeedPhase::Done, 1.0, bytes, &Live::default());
+                    return Outcome::Partial(
+                        Box::new(result),
+                        format!("Ookla Speedtest stopped before the upload finished: {detail}"),
+                    );
+                }
                 Err(e) => match ookla_fallback(e) {
                     Ok((reason, detail)) => {
                         result.fallback = Some(reason);
@@ -783,18 +836,50 @@ async fn execute(
         &emit,
     )
     .await;
-    let (event, result) = match out {
-        Outcome::Done(r) => {
-            let mut r = *r;
-            let end = app.try_state::<AppState>().map(|s| s.snapshot());
-            r.invalid_reason = invalid_reason(&baseline, end.as_ref());
-            r.allowed_bands = baseline.config.as_ref().map(|c| c.lte_bands);
-            r.source = Some(source);
-            r.ip_range = baseline.ip_range.clone();
-            let (a, rec) = (app.clone(), r.clone());
+    // Fills in what only the end of the test knows, and saves the result.
+    let save = |r: Box<SpeedTestResult>, partial: bool| {
+        let mut r = *r;
+        let end = app.try_state::<AppState>().map(|s| s.snapshot());
+        let found = invalid_reason(&baseline, end.as_ref());
+        r.invalid_reason = if partial {
+            partial_invalid_reason(found)
+        } else {
+            found
+        };
+        r.allowed_bands = baseline.config.as_ref().map(|c| c.lte_bands);
+        r.source = Some(source);
+        r.ip_range = baseline.ip_range.clone();
+        let (a, rec) = (app.clone(), r.clone());
+        async move {
             let _ = tokio::task::spawn_blocking(move || crate::history::record_speedtest(&a, &rec))
                 .await;
+            r
+        }
+    };
+    let (event, result) = match out {
+        Outcome::Done(r) => {
+            let r = save(r, false).await;
             (SpeedTestEvent::Finished(r.clone()), Ok(r))
+        }
+        Outcome::Partial(r, message) => {
+            // Saved, marked incomplete, and logged so the stop can be looked into afterwards.
+            let r = save(r, true).await;
+            let (dir, m) = (data_dir.clone(), message.clone());
+            let _ = tokio::task::spawn_blocking(move || {
+                log_failure(&dir, provider, source, FailReason::Ookla, &m)
+            })
+            .await;
+            if partial_is_shown(source) {
+                (SpeedTestEvent::Finished(r.clone()), Ok(r))
+            } else {
+                (
+                    SpeedTestEvent::Failed {
+                        message: message.clone(),
+                        reason: FailReason::Ookla,
+                    },
+                    Err(message),
+                )
+            }
         }
         Outcome::Cancelled => (SpeedTestEvent::Cancelled, Err("cancelled".to_string())),
         Outcome::Failed(reason, message) => {
@@ -1027,13 +1112,50 @@ mod tests {
         assert_eq!(start_refusal(&s), Some(router_core::IP_REFRESH_RUNNING));
         s.ip_refresh.as_mut().unwrap().active = false;
         assert_eq!(start_refusal(&s), None, "a finished run holds nothing");
-        s.safe_apply.phase = Phase::Probation;
+        // A change that is still being applied refuses a test. Its trial doesn't: the new bands
+        // are in place, and measuring them is how the user decides to keep them.
+        s.safe_apply.phase = Phase::Applying;
         assert_eq!(start_refusal(&s), Some(ERR_BUSY));
+        s.safe_apply.phase = Phase::Probation;
+        assert_eq!(start_refusal(&s), None);
         assert!(!band_change_open(&view(Phase::Committed, false)));
         assert!(band_change_open(&view(Phase::Probation, false)));
         assert!(band_change_open(&view(Phase::Applying, false)));
         // Between the steps of a two-step apply the phase is Committed, but step 2 is due.
         assert!(band_change_open(&view(Phase::Committed, true)));
+    }
+
+    #[test]
+    fn a_test_may_run_in_the_trial_of_the_last_step_only() {
+        assert!(!change_blocks_test(&view(Phase::Idle, false)));
+        assert!(!change_blocks_test(&view(Phase::Committed, false)));
+        assert!(!change_blocks_test(&view(Phase::Probation, false)));
+        for phase in [
+            Phase::Snapshotting,
+            Phase::Applying,
+            Phase::Verifying,
+            Phase::ReattachGrace,
+            Phase::Reverting {
+                attempt: 1,
+                fallback: false,
+            },
+        ] {
+            assert!(change_blocks_test(&view(phase, false)));
+        }
+        // A two-step apply: the trial of step 2 is the trial of the bands the user asked for.
+        assert!(!change_blocks_test(&view(Phase::Probation, true)));
+        let mut step1 = view(Phase::Probation, true);
+        step1.sequence.as_mut().unwrap().step = 1;
+        assert!(
+            change_blocks_test(&step1),
+            "step 1 is the primary band alone, not the set that was asked for"
+        );
+        assert!(
+            change_blocks_test(&view(Phase::Committed, true)),
+            "between the steps"
+        );
+        // Everything else that follows a band change still sees the trial as an open change.
+        assert!(band_change_open(&view(Phase::Probation, false)));
     }
 
     fn snap_with(serving: &ServingCell, config: Option<NetConfig>, phase: Phase) -> AppSnapshot {
@@ -1117,11 +1239,14 @@ mod tests {
             invalid_reason(&start, Some(&reconfigured)),
             Some(InvalidReason::BandChange)
         );
-        let open = snap_with(&cell(3, 103, Some(41)), Some(net(&[3])), Phase::Probation);
+        let applying = snap_with(&cell(3, 103, Some(41)), Some(net(&[3])), Phase::Applying);
         assert_eq!(
-            invalid_reason(&start, Some(&open)),
+            invalid_reason(&start, Some(&applying)),
             Some(InvalidReason::BandChange)
         );
+        // A test that ends inside the trial of the same bands measured those bands.
+        let trial = snap_with(&cell(3, 103, Some(41)), Some(net(&[3])), Phase::Probation);
+        assert_eq!(invalid_reason(&start, Some(&trial)), None);
         assert_eq!(
             invalid_reason(&start, None),
             Some(InvalidReason::BandChange)
@@ -1318,6 +1443,53 @@ mod tests {
             serde_json::to_value(SpeedTestEvent::Cancelled).unwrap()["kind"],
             "cancelled"
         );
+    }
+
+    /// A test that lost its upload is kept, but never counted: it is marked like a result that
+    /// doesn't describe one band config, unless a stronger reason already applies.
+    #[test]
+    fn a_result_without_its_upload_is_marked_incomplete() {
+        assert_eq!(
+            partial_invalid_reason(None),
+            Some(InvalidReason::Incomplete)
+        );
+        assert_eq!(
+            partial_invalid_reason(Some(InvalidReason::BandChange)),
+            Some(InvalidReason::BandChange)
+        );
+        assert_eq!(
+            serde_json::to_value(InvalidReason::Incomplete).unwrap(),
+            "incomplete"
+        );
+    }
+
+    /// A test the user pressed shows what it measured. A scan or an automatic test needs a
+    /// whole result, so it reports the stop and retries or skips as before.
+    #[test]
+    fn only_a_manual_test_shows_a_result_without_its_upload() {
+        assert!(partial_is_shown(SpeedTestSource::Manual));
+        assert!(!partial_is_shown(SpeedTestSource::Scan));
+        assert!(!partial_is_shown(SpeedTestSource::Auto));
+    }
+
+    #[test]
+    fn an_ookla_run_that_stopped_in_its_upload_becomes_a_result_without_upload() {
+        let measured = ookla::OoklaMeasured {
+            idle_ping_ms: Some(24.0),
+            download_mbps: Some(185.0),
+            upload_mbps: None,
+            ping_down_ms: Some(236.0),
+            ping_up_ms: None,
+            bytes_used: 251_000_000,
+            server: Some("Example Net, Example City".into()),
+        };
+        let mut r = blank_result(SpeedTestSettings::default(), ServingCell::default());
+        take_ookla(&mut r, measured);
+        assert_eq!(r.provider, SpeedTestProvider::Ookla);
+        assert_eq!(r.download_mbps, Some(185.0));
+        assert_eq!(r.upload_mbps, None);
+        assert_eq!(r.idle_ping_ms, Some(24.0));
+        assert_eq!(r.size_applies, Some(false));
     }
 
     async fn cf_server() -> MockServer {

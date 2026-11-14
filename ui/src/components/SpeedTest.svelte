@@ -13,7 +13,7 @@
   import { api } from '../lib/backend'
   import { scanActive } from '../lib/scan.svelte'
   import { app } from '../lib/store.svelte'
-  import { changeOpen } from '../lib/bands'
+  import { changeBlocksTest } from '../lib/bands'
   import { t } from '../lib/i18n'
   import { errorText } from '../lib/errors'
   import { formatNumber, isolate } from '../lib/format'
@@ -62,7 +62,8 @@
 
   // A band change is open: the backend refuses, so the button says why up front.
   const scanning = $derived(scanActive())
-  const bandBusy = $derived(changeOpen(app.snapshot?.safeApply) || scanning)
+  // A test may run in the trial of a band change: that is when the new bands are judged.
+  const bandBusy = $derived(changeBlocksTest(app.snapshot?.safeApply) || scanning)
 
   // While running, the live values; otherwise the newest saved result.
   const values = $derived(speed.running ? speed.live : last)

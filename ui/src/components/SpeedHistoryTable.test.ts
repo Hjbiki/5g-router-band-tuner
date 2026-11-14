@@ -35,3 +35,18 @@ describe('SpeedHistoryTable', () => {
     expect(notes).toEqual([t('speedtest.history.notComparableIp'), t('speedtest.history.notComparable')])
   })
 })
+
+describe('SpeedHistoryTable, a test that lost its upload', () => {
+  afterEach(() => cleanup())
+
+  it('keeps its numbers on screen and says the upload was not measured', () => {
+    app.settings = settingsFixture()
+    render(SpeedHistoryTable, {
+      rows: [resultFixture({ atMs: 2_000, downloadMbps: 185, uploadMbps: null, invalidReason: 'incomplete' })],
+    })
+    // Not the "not comparable" row, which hides the numbers.
+    expect(screen.queryByTestId('not-comparable')).toBeNull()
+    expect(screen.getByTestId('upload-missing').textContent?.trim()).toBe(t('speedtest.history.uploadMissing'))
+    expect(screen.getByText(/^185/)).toBeTruthy()
+  })
+})

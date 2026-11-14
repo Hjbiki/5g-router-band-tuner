@@ -49,6 +49,12 @@ pub enum OoklaError {
     NotStarted(String),
     /// The CLI ran (and may have used data) but gave no result.
     Failed(String),
+    /// The CLI stopped after its download had finished: what it measured up to there, and why
+    /// it stopped.
+    Partial {
+        measured: Box<OoklaMeasured>,
+        detail: String,
+    },
     TimedOut,
 }
 
@@ -204,11 +210,13 @@ struct Output {
 
 /// Why a run gave no result: the CLI's own error lines (JSON log lines on either stream, or
 /// plain text on stderr) and the test it had reached, e.g. "during the upload test: Cannot
-/// read from socket".
+/// read from socket". With no error line at all, the last warning the CLI logged stands in, so
+/// a stop without an error still leaves something to go on.
 pub fn failure_detail(stdout: &str, stderr: &str) -> String {
     let mut errors: Vec<String> = Vec::new();
     let mut plain: Vec<String> = Vec::new();
     let mut reached = None;
+    let mut last_log: Option<String> = None;
     for line in stdout.lines().chain(stderr.lines()) {
         let line = line.trim();
         if line.is_empty() {
@@ -220,11 +228,21 @@ pub fn failure_detail(stdout: &str, stderr: &str) -> String {
                     reached = Some(k.to_string());
                 }
                 let is_error = o.error_level() || o.kind.as_deref() == Some("error");
+                // Routine chatter ("Selecting a server") would read as a cause, so it never stands in.
+                let chatter = matches!(
+                    o.level.as_deref(),
+                    Some("info") | Some("debug") | Some("trace")
+                );
+                let is_log = o.kind.as_deref() == Some("log") && !chatter;
                 let msg = o.error.or(o.message);
-                if let (true, Some(m)) = (is_error, msg) {
-                    if !errors.contains(&m) {
-                        errors.push(m);
+                match (is_error, msg) {
+                    (true, Some(m)) => {
+                        if !errors.contains(&m) {
+                            errors.push(m);
+                        }
                     }
+                    (false, Some(m)) if is_log => last_log = Some(m),
+                    _ => {}
                 }
             }
             Err(_) => {
@@ -238,6 +256,8 @@ pub fn failure_detail(stdout: &str, stderr: &str) -> String {
         errors.join("; ")
     } else if !plain.is_empty() {
         plain.join(" ")
+    } else if let Some(m) = last_log {
+        m
     } else {
         "no result in the CLI output".to_string()
     };
@@ -336,6 +356,77 @@ pub fn parse(stdout: &str) -> Result<OoklaMeasured, String> {
     Err(last_msg.unwrap_or_else(|| "no result in the CLI output".into()))
 }
 
+/// What a run that gave no result had measured before it stopped: its idle ping and its
+/// download, from the interim lines. Only when an upload line follows the download, because
+/// that is how the CLI says the download finished; a download still running leaves nothing.
+/// The upload's own interim numbers are never kept.
+pub fn partial(stdout: &str) -> Option<OoklaMeasured> {
+    let mut idle_ping_ms = None;
+    let mut download_mbps = None;
+    let mut ping_down_ms = None;
+    let mut down_bytes = 0u64;
+    let mut up_bytes = 0u64;
+    let mut upload_seen = false;
+    let mut server = None;
+    for line in stdout.lines() {
+        let Ok(o) = serde_json::from_str::<Output>(line.trim()) else {
+            continue;
+        };
+        if let Some(s) = o.server {
+            server = match (s.name, s.location) {
+                (Some(n), Some(l)) if !l.is_empty() => Some(format!("{n}, {l}")),
+                (n, _) => n,
+            };
+        }
+        match o.kind.as_deref() {
+            Some("ping") => {
+                idle_ping_ms = o.ping.and_then(|p| p.latency).or(idle_ping_ms);
+            }
+            Some("download") => {
+                if let Some(d) = o.download {
+                    download_mbps = mbps(d.bandwidth).or(download_mbps);
+                    ping_down_ms = d.latency.and_then(|l| l.iqm).or(ping_down_ms);
+                    down_bytes = d.bytes.unwrap_or(down_bytes);
+                }
+            }
+            Some("upload") => {
+                upload_seen = true;
+                up_bytes = o.upload.and_then(|u| u.bytes).unwrap_or(up_bytes);
+            }
+            _ => {}
+        }
+    }
+    (upload_seen && download_mbps.is_some()).then_some(OoklaMeasured {
+        idle_ping_ms,
+        download_mbps,
+        upload_mbps: None,
+        ping_down_ms,
+        ping_up_ms: None,
+        bytes_used: down_bytes + up_bytes,
+        server,
+    })
+}
+
+/// What a finished CLI run amounts to: its result, or why there is none. A run that stopped
+/// after its download keeps what it measured (`OoklaError::Partial`).
+pub fn outcome(stdout: &str, stderr: &str, exit: Option<i32>) -> Result<OoklaMeasured, OoklaError> {
+    if let Ok(m) = parse(stdout) {
+        return Ok(m);
+    }
+    let code = exit.map(|c| format!(" (exit {c})")).unwrap_or_default();
+    let detail: String = format!("{}{code}", failure_detail(stdout, stderr))
+        .chars()
+        .take(200)
+        .collect();
+    Err(match partial(stdout) {
+        Some(measured) => OoklaError::Partial {
+            measured: Box::new(measured),
+            detail,
+        },
+        None => OoklaError::Failed(detail),
+    })
+}
+
 /// Runs the CLI with no console window, a timeout and cancel. Interim values go to `progress` as
 /// the CLI reports them.
 pub async fn run(
@@ -415,20 +506,7 @@ pub async fn run(
         _ = cancel.wait_for(|c| *c) => return Err(OoklaError::Cancelled),
     };
     let status = status.map_err(|e| OoklaError::Failed(e.to_string()))?;
-    match parse(&stdout) {
-        Ok(m) => Ok(m),
-        Err(_) => {
-            let stderr = String::from_utf8_lossy(&stderr);
-            let msg = failure_detail(&stdout, &stderr);
-            let code = status
-                .code()
-                .map(|c| format!(" (exit {c})"))
-                .unwrap_or_default();
-            Err(OoklaError::Failed(
-                format!("{msg}{code}").chars().take(200).collect(),
-            ))
-        }
-    }
+    outcome(&stdout, &String::from_utf8_lossy(&stderr), status.code())
 }
 
 #[cfg(test)]
@@ -513,6 +591,97 @@ mod tests {
             "[error] Timeout occurred in connect."
         );
         assert_eq!(failure_detail("", ""), "no result in the CLI output");
+    }
+
+    /// A run that stopped with no error-level line still says the last warning the CLI logged.
+    #[test]
+    fn a_silent_stop_says_the_last_thing_the_cli_logged() {
+        let stdout = concat!(
+            r#"{"type":"log","timestamp":"t","message":"Selecting a server","level":"info"}"#,
+            "\n",
+            r#"{"type":"download","timestamp":"t","download":{"bandwidth":4000000,"bytes":1000,"progress":1.0}}"#,
+            "\n",
+            r#"{"type":"upload","timestamp":"t","upload":{"bandwidth":100000,"bytes":100,"progress":0.2}}"#,
+            "\n",
+            r#"{"type":"log","timestamp":"t","message":"Upload test failed","level":"warning"}"#,
+        );
+        assert_eq!(
+            failure_detail(stdout, ""),
+            "during the upload test: Upload test failed"
+        );
+        // An error-level line still wins over a later, milder one.
+        let both = concat!(
+            r#"{"type":"log","timestamp":"t","message":"Cannot write","level":"error"}"#,
+            "\n",
+            r#"{"type":"log","timestamp":"t","message":"Closing","level":"info"}"#,
+        );
+        assert_eq!(failure_detail(both, ""), "Cannot write");
+        // Routine chatter is never given as the cause.
+        let chatter =
+            r#"{"type":"log","timestamp":"t","message":"Selecting a server","level":"info"}"#;
+        assert_eq!(failure_detail(chatter, ""), "no result in the CLI output");
+    }
+
+    /// Shaped like the CLI's lines; the values and the server are made up.
+    const STOPPED_IN_UPLOAD: &str = concat!(
+        r#"{"type":"testStart","timestamp":"t","server":{"name":"Example Net","location":"Example City"}}"#,
+        "\n",
+        r#"{"type":"ping","timestamp":"t","ping":{"jitter":1.0,"latency":30.0,"progress":0.5}}"#,
+        "\n",
+        r#"{"type":"ping","timestamp":"t","ping":{"jitter":1.0,"latency":24.0,"progress":1.0}}"#,
+        "\n",
+        r#"{"type":"download","timestamp":"t","download":{"bandwidth":20000000,"bytes":100000000,"progress":0.5,"latency":{"iqm":200.0}}}"#,
+        "\n",
+        r#"{"type":"download","timestamp":"t","download":{"bandwidth":23125000,"bytes":250000000,"progress":1.0,"latency":{"iqm":236.0}}}"#,
+        "\n",
+        r#"{"type":"upload","timestamp":"t","upload":{"bandwidth":2500000,"bytes":1000000,"progress":0.3,"latency":{"iqm":90.0}}}"#,
+    );
+
+    #[test]
+    fn a_run_that_stops_in_the_upload_keeps_its_ping_and_download() {
+        let m = partial(STOPPED_IN_UPLOAD).expect("the download had finished");
+        assert_eq!(m.idle_ping_ms, Some(24.0));
+        assert_eq!(m.download_mbps, Some(185.0));
+        assert_eq!(m.ping_down_ms, Some(236.0));
+        // The upload never finished, so neither of its numbers is a result.
+        assert_eq!(m.upload_mbps, None);
+        assert_eq!(m.ping_up_ms, None);
+        assert_eq!(m.bytes_used, 251_000_000);
+        assert_eq!(m.server.as_deref(), Some("Example Net, Example City"));
+    }
+
+    #[test]
+    fn a_run_that_stops_before_the_upload_keeps_nothing() {
+        // The download was still running: its last number isn't a result.
+        let cut = STOPPED_IN_UPLOAD
+            .lines()
+            .take(4)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(partial(&cut), None);
+        assert_eq!(partial(""), None);
+    }
+
+    #[test]
+    fn a_stopped_run_is_partial_only_when_the_download_had_finished() {
+        match outcome(STOPPED_IN_UPLOAD, "", Some(2)) {
+            Err(OoklaError::Partial { measured, detail }) => {
+                assert_eq!(measured.download_mbps, Some(185.0));
+                assert_eq!(
+                    detail,
+                    "during the upload test: no result in the CLI output (exit 2)"
+                );
+            }
+            other => panic!("expected a partial result, got {other:?}"),
+        }
+        assert_eq!(
+            outcome("", "", Some(2)),
+            Err(OoklaError::Failed(
+                "no result in the CLI output (exit 2)".into()
+            ))
+        );
+        // A complete run is still a result.
+        assert!(outcome(SAMPLE, "", Some(0)).is_ok());
     }
 
     /// Shaped like the CLI's interim lines; the values are synthetic.

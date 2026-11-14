@@ -218,3 +218,15 @@ describe('speed-test settings and markers', () => {
     expect(invalidReason({ ...resultFixture(), invalidReason: null } as never)).toBeNull()
   })
 })
+
+describe('a test that lost its upload', () => {
+  it('is named as incomplete, not as a changed band, and is told apart from the others', async () => {
+    const { incomplete, notComparableKey } = await import('./speedtest.svelte')
+    const { resultFixture } = await import('./speedtest.fixtures')
+    const cut = resultFixture({ uploadMbps: null, invalidReason: 'incomplete' })
+    expect(notComparableKey(cut)).toBe('speedtest.history.incomplete')
+    expect(incomplete(cut)).toBe(true)
+    expect(incomplete(resultFixture({ invalidReason: 'bandChange' }))).toBe(false)
+    expect(incomplete(resultFixture())).toBe(false)
+  })
+})

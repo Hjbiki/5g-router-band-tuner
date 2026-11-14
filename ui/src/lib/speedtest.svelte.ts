@@ -197,8 +197,17 @@ export function invalidReason(r: SpeedTestResult): string | null {
   return r.invalidReason ?? null
 }
 
-/** Why a result isn't comparable, in words: the internet address or the band changed mid-test. */
+/**
+ * A test that stopped before its upload was measured. Its other numbers are real, so they stay
+ * on screen; it is still left out of every average and ranking, like any marked result.
+ */
+export function incomplete(r: SpeedTestResult): boolean {
+  return r.invalidReason === 'incomplete'
+}
+
+/** Why a result isn't counted, in words: the upload is missing, or the internet address or the band changed mid-test. */
 export function notComparableKey(r: SpeedTestResult): MessageKey {
+  if (incomplete(r)) return 'speedtest.history.incomplete'
   return r.invalidReason === 'ipChanged' ? 'speedtest.history.notComparableIp' : 'speedtest.history.notComparable'
 }
 

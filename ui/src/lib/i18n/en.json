@@ -261,6 +261,7 @@
     "probation": "Checking that the connection stays stable",
     "secondsLeft": "{seconds} s left",
     "keep": "Keep these bands",
+    "testSpeed": "Test the speed",
     "revert": "Revert now",
     "keeping": "Keeping…",
     "revertingNow": "Reverting…",
@@ -823,7 +824,9 @@
       "pci": "PCI {pci}",
       "noNr": "no 5G",
       "notComparable": "Not comparable (band changed during the test)",
-      "notComparableIp": "Not comparable (the internet address changed during the test)"
+      "notComparableIp": "Not comparable (the internet address changed during the test)",
+      "incomplete": "Upload not measured: the test stopped early. Not counted in averages.",
+      "uploadMissing": "not measured"
     },
     "settings": {
       "title": "Test settings",

@@ -150,6 +150,18 @@ export function changeOpen(view: Pick<SafeApplyView, 'phase' | 'sequence'> | nul
   return view != null && (!changeClosed(view.phase) || view.sequence != null)
 }
 
+/**
+ * True while a band change keeps a speed test from starting: any open change except the trial
+ * of its last step. In that trial the new bands are in place, and a test is how the user judges
+ * them. Step 1 of a two-step apply is the primary band alone, so its trial doesn't count
+ * (mirrors the backend's `change_blocks_test`).
+ */
+export function changeBlocksTest(view: Pick<SafeApplyView, 'phase' | 'sequence'> | null | undefined): boolean {
+  if (!view || !changeOpen(view)) return false
+  const lastStep = view.sequence == null || view.sequence.step >= view.sequence.total
+  return !(view.phase.kind === 'probation' && lastStep)
+}
+
 /** Band numbers in a config, ascending. */
 export function bandsOf(cfg: NetConfig | null | undefined): number[] {
   return cfg ? supportedBands(cfg.lteBands) : []

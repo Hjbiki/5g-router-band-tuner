@@ -65,12 +65,20 @@ describe('SpeedTest', () => {
     expect(api.cancelSpeedTest).toHaveBeenCalledOnce()
   })
 
-  it('refuses to start during a band change', async () => {
-    app.snapshot = snap({ safeApply: { phase: { kind: 'probation' }, secondsLeft: 60, previous: null, requested: null } })
+  it('refuses to start while a band change is being applied', async () => {
+    app.snapshot = snap({ safeApply: { phase: { kind: 'applying' }, secondsLeft: null, previous: null, requested: null } })
     render(SpeedTest)
     const run = screen.getByRole('button', { name: t('speedtest.run') }) as HTMLButtonElement
     expect(run.disabled).toBe(true)
     expect(screen.getByText(t('speedtest.error.busy'))).toBeTruthy()
+  })
+
+  it('can start in the trial of a band change, which is when the new bands are judged', async () => {
+    app.snapshot = snap({ safeApply: { phase: { kind: 'probation' }, secondsLeft: 60, previous: null, requested: null } })
+    render(SpeedTest)
+    const run = screen.getByRole('button', { name: t('speedtest.run') }) as HTMLButtonElement
+    expect(run.disabled).toBe(false)
+    expect(screen.queryByText(t('speedtest.error.busy'))).toBeNull()
   })
 
   it('shows the diagnosis and the results by band and cell', async () => {

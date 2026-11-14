@@ -8,7 +8,7 @@
   import { formatNumber } from '../lib/format'
   import type { SpeedTestResult } from '../lib/bindings/SpeedTestResult'
   import type { SpeedTestSource } from '../lib/bindings/SpeedTestSource'
-  import { busyPing, invalidReason, ipRangeLabel, latLevel, mbps, ms, notComparableKey, servingBands, servingDetail, whenLabel } from '../lib/speedtest.svelte'
+  import { busyPing, incomplete, invalidReason, ipRangeLabel, latLevel, mbps, ms, notComparableKey, servingBands, servingDetail, whenLabel } from '../lib/speedtest.svelte'
 
   let {
     rows,
@@ -85,12 +85,16 @@
           {#if sourceOf}<td data-testid="source">{t(`speedtest.source.${sourceOf(r)}`)}</td>{/if}
           <td><bdi dir="ltr">{servingBands(r.serving)}</bdi> <span class="k">{servingDetail(r.serving)}</span></td>
           <td data-testid="ip-range">{#if ipRangeLabel(r)}<bdi dir="ltr" class="num">{ipRangeLabel(r)}</bdi>{:else}<span class="k">{t('app.unknown')}</span>{/if}</td>
-          {#if invalidReason(r)}
+          {#if invalidReason(r) && !incomplete(r)}
             <!-- The band or cell changed mid-test: the numbers mix two connections. -->
             <td colspan="4" class="k" data-testid="not-comparable">{t(notComparableKey(r))}</td>
           {:else}
             <td class="n strong-cell"><bdi dir="ltr">{mbps(r.downloadMbps, digits)}</bdi></td>
-            <td class="n"><bdi dir="ltr">{mbps(r.uploadMbps, digits)}</bdi></td>
+            <td class="n">
+              <!-- The test stopped during its upload: the other numbers are real. -->
+              {#if incomplete(r)}<span class="k" data-testid="upload-missing">{t('speedtest.history.uploadMissing')}</span
+                >{:else}<bdi dir="ltr">{mbps(r.uploadMbps, digits)}</bdi>{/if}
+            </td>
             <td class="n"><bdi dir="ltr">{ms(r.idlePingMs, digits)}</bdi></td>
             <td class="n">
               <bdi dir="ltr" class={lvl ? `lat-${lvl}` : ''}>{ms(b.ms, digits)}</bdi>

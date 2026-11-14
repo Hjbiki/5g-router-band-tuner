@@ -6,7 +6,7 @@
   import { t, type MessageKey } from '../lib/i18n'
   import { errorText } from '../lib/errors'
   import { formatNumber, isolate } from '../lib/format'
-  import { bandsOf, clock, templateParts } from '../lib/bands'
+  import { bandsOf, changeBlocksTest, clock, templateParts } from '../lib/bands'
   import { bandList } from '../lib/eventText'
   import type { RevertReason } from '../lib/bindings/RevertReason'
   import type { ApnTarget } from '../lib/bindings/ApnTarget'
@@ -180,6 +180,11 @@
   )
   const showKeep = $derived(phase.kind === 'reattachGrace' || phase.kind === 'probation')
   const canKeep = $derived(phase.kind === 'probation')
+  // The trial is when the new bands are judged, so it offers the way to measure them. It only
+  // opens the Speed test page; the clock keeps running, and Keep and Revert stay in this banner.
+  const canTest = $derived(
+    bandView !== null && phase.kind === 'probation' && !changeBlocksTest(bandView) && app.tab !== 'speedtest',
+  )
   const showRevert = $derived(
     ['snapshotting', 'applying', 'verifying', 'reattachGrace', 'probation', 'revertPending', 'revertFailed'].includes(
       phase.kind,
@@ -320,6 +325,11 @@
             >{pending === 'keep' ? t('safeApply.keeping') : t('safeApply.keep')}</button
           >
           {#if !canKeep}<span id="{idPrefix}keep-reason" class="sr-only">{t('safeApply.keepUnavailable')}</span>{/if}
+        {/if}
+        {#if canTest}
+          <button type="button" class="secondary" disabled={pending !== null} onclick={() => (app.tab = 'speedtest')}
+            >{t('safeApply.testSpeed')}</button
+          >
         {/if}
         {#if showRevert}
           <button

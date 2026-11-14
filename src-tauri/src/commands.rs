@@ -825,7 +825,13 @@ pub async fn keep_now(state: State<'_, AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub async fn revert_now(state: State<'_, AppState>) -> CmdResult<()> {
+pub async fn revert_now(
+    state: State<'_, AppState>,
+    st: State<'_, crate::speedtest::SpeedTestState>,
+) -> CmdResult<()> {
+    // A test may be running in the trial. The bands are about to change under it, so it stops
+    // here; nothing holds the revert up.
+    st.cancel();
     state.send(Command::RevertNow).await
 }
 

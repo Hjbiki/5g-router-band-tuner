@@ -5,6 +5,7 @@ import {
   LTE_BAND_INFO,
   bandChange,
   bandsOf,
+  changeBlocksTest,
   changeOpen,
   clock,
   bandsToHex,
@@ -169,5 +170,24 @@ describe('LTE_BAND_INFO drift', () => {
   })
   it('agrees for every band 1-53', () => {
     for (const [b, v] of rust) if (b <= 53) expect(LTE_BAND_INFO[b], `B${b}`).toEqual(v)
+  })
+})
+
+describe('changeBlocksTest', () => {
+  const seq = (step: number) => ({ step, total: 2, primary: 3, finalConfig: cfg('45'), origin: 'user' as const })
+  it('lets a speed test run in the trial of a change, and at no other moment of it', () => {
+    expect(changeBlocksTest({ phase: { kind: 'probation' } })).toBe(false)
+    for (const kind of ['snapshotting', 'applying', 'verifying', 'reattachGrace'] as const) {
+      expect(changeBlocksTest({ phase: { kind } })).toBe(true)
+    }
+    expect(changeBlocksTest({ phase: { kind: 'idle' } })).toBe(false)
+    expect(changeBlocksTest({ phase: { kind: 'committed' } })).toBe(false)
+    expect(changeBlocksTest(null)).toBe(false)
+  })
+  it('in a two-step apply only the trial of the last step counts', () => {
+    expect(changeBlocksTest({ phase: { kind: 'probation' }, sequence: seq(2) })).toBe(false)
+    // Step 1 is the primary band alone, not the set that was asked for.
+    expect(changeBlocksTest({ phase: { kind: 'probation' }, sequence: seq(1) })).toBe(true)
+    expect(changeBlocksTest({ phase: { kind: 'committed' }, sequence: seq(1) })).toBe(true)
   })
 })

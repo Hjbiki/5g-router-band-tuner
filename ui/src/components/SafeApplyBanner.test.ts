@@ -55,6 +55,41 @@ describe('SafeApplyBanner', () => {
     expect(api.revertNow).toHaveBeenCalled()
   })
 
+  it('offers a speed test in the trial, and only then', async () => {
+    app.tab = 'bands'
+    show({ kind: 'probation' })
+    render(SafeApplyBanner)
+    await fireEvent.click(screen.getByRole('button', { name: t('safeApply.testSpeed') }))
+    expect(app.tab).toBe('speedtest')
+    // It only opens the page: Keep and Revert are untouched.
+    expect(api.keepNow).not.toHaveBeenCalled()
+    expect(api.revertNow).not.toHaveBeenCalled()
+    cleanup()
+    // On the Speed test page the button would lead nowhere.
+    show({ kind: 'probation' })
+    render(SafeApplyBanner)
+    expect(screen.queryByRole('button', { name: t('safeApply.testSpeed') })).toBeNull()
+    cleanup()
+    app.tab = 'bands'
+    show({ kind: 'applying' })
+    render(SafeApplyBanner)
+    expect(screen.queryByRole('button', { name: t('safeApply.testSpeed') })).toBeNull()
+    cleanup()
+    // Step 1 of a two-step apply is the primary band alone: nothing to judge yet.
+    app.snapshot = snap({
+      safeApply: {
+        phase: { kind: 'probation' },
+        secondsLeft: 42,
+        previous: null,
+        requested: null,
+        sequence: { step: 1, total: 2, primary: 3, finalConfig: snap().config!, origin: 'user' },
+      },
+    })
+    render(SafeApplyBanner)
+    expect(screen.queryByRole('button', { name: t('safeApply.testSpeed') })).toBeNull()
+    app.tab = 'dashboard'
+  })
+
   it('Keep responds at once: both buttons disabled and "Keeping…" until the phase changes', async () => {
     show({ kind: 'probation' })
     render(SafeApplyBanner)
