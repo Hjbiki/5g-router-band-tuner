@@ -8,6 +8,7 @@ license.workspace = true
 async-trait = "0.1"
 hex = "0.4.3"
 hmac = "0.13.0"
+base64 = "0.22"
 flate2 = "1"
 regex = "1"
 pbkdf2 = { version = "0.13.0", features = ["hmac"] }

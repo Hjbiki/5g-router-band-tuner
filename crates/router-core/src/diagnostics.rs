@@ -124,12 +124,163 @@ pub fn is_sensitive(name: &str) -> bool {
     SENSITIVE_TAGS.contains(&n.as_str()) || SENSITIVE_PARTS.iter().any(|p| n.contains(p))
 }
 
+/// Which values a redactor lets through as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rules {
+    /// The read-only endpoints the app itself asks for: a value stays unless its name is
+    /// sensitive.
+    #[default]
+    Diagnostics,
+    /// Whatever a router's own page asked for (`capture.rs`), which can be any page at all: a
+    /// value stays only under a name known to be technical, so a device's name, a message or a
+    /// place can't come through. Everything else becomes a stand-in of the same shape.
+    Capture,
+    /// A login exchange: the names stay, and every value is hidden, its length too.
+    ShapeOnly,
+}
+
+/// What a `ShapeOnly` value becomes.
+pub const HIDDEN: &str = "(hidden)";
+/// A kept value longer than this is free text, not a reading or a setting.
+const KEPT_MAX: usize = 200;
+
+/// Sensitive in a capture as well: a page can show messages, contacts and Wi-Fi secrets that the
+/// app's own reads never touch.
+const CAPTURE_SENSITIVE_PARTS: &[&str] = &[
+    "sms", "content", "message", "subject", "contact", "psk", "wpa", "wep", "secret", "pass",
+    "cred", "cookie", "csrf", "session", "location", "alias", "owner", "mail", "account", "ecgi",
+];
+/// The same, as whole words of a name (`cellId` is `cell` and `id`), where the word alone would
+/// match too much as a part.
+const CAPTURE_SENSITIVE_WORDS: &[&str] = &[
+    "ci", "cid", "eci", "nci", "gci", "sid", "msg", "text", "body", "pin", "puk", "pw", "psw",
+    "url", "uri", "number", "host", "addr", "desc", "label", "login", "auth",
+];
+/// Names whose values a capture keeps exactly: signal readings, band and mode settings, states,
+/// the command a request names, and what the model and the operator are.
+const CAPTURE_KEEP_PARTS: &[&str] = &[
+    "rsrp",
+    "rsrq",
+    "sinr",
+    "rssi",
+    "rscp",
+    "ecio",
+    "signal",
+    "band",
+    "arfcn",
+    "freq",
+    "mode",
+    "state",
+    "status",
+    "version",
+    "model",
+    "hardware",
+    "firmware",
+    "software",
+    "vendor",
+    "manufactur",
+    "product",
+    "plmn",
+    "operator",
+    "numeric",
+    "enable",
+    "switch",
+    "result",
+    "support",
+    "capab",
+    "roam",
+    "goform",
+    "command",
+    "method",
+    "action",
+    "jsonrpc",
+    "nettype",
+    "networktype",
+    "network_type",
+    "net_type",
+    "duplex",
+    "aggregat",
+];
+const CAPTURE_KEEP_WORDS: &[&str] = &[
+    "rat", "type", "code", "cmd", "mcc", "mnc", "snr", "cqi", "csq", "bw", "bar", "bars", "level",
+    "error", "errno", "errcode", "func", "module", "object", "lock", "mimo", "rank", "dbm",
+];
+
+/// A name's words, lowercased: split at anything that isn't a letter or digit, where a small
+/// letter meets a capital, where an acronym ends (`LTEBand`), and between letters and digits.
+fn words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if let Some(&prev) = i.checked_sub(1).and_then(|p| chars.get(p)) {
+            let next_lower = chars.get(i + 1).is_some_and(char::is_ascii_lowercase);
+            let boundary = (prev.is_ascii_lowercase() && c.is_ascii_uppercase())
+                || (prev.is_ascii_uppercase() && c.is_ascii_uppercase() && next_lower)
+                || (prev.is_ascii_digit() != c.is_ascii_digit() && prev.is_ascii_alphanumeric());
+            if boundary && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c.to_ascii_lowercase());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Sensitive under the capture's rules. A band mask (`lte_band_mask`) is a setting, not the
+/// subnet mask that `mask` is on the list for.
+pub fn capture_sensitive(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    let listed = SENSITIVE_TAGS.contains(&n.as_str())
+        || SENSITIVE_PARTS
+            .iter()
+            .any(|p| n.contains(p) && !(*p == "mask" && n.contains("band")))
+        || CAPTURE_SENSITIVE_PARTS.iter().any(|p| n.contains(p));
+    listed
+        || words(name)
+            .iter()
+            .any(|w| CAPTURE_SENSITIVE_WORDS.contains(&w.as_str()))
+}
+
+/// Whether a capture keeps the value under this name exactly.
+pub fn capture_keeps(name: &str) -> bool {
+    if capture_sensitive(name) {
+        return false;
+    }
+    let n = name.to_ascii_lowercase();
+    CAPTURE_KEEP_PARTS.iter().any(|p| n.contains(p))
+        || words(name)
+            .iter()
+            .any(|w| CAPTURE_KEEP_WORDS.contains(&w.as_str()))
+}
+
+/// A name a program gives a thing, like `router_get_status` or `zwrt_web.api`: small letters,
+/// digits, `_` and `.`, with at least one of the two joiners. JSON-RPC puts these in a bare list.
+fn code_like(s: &str) -> bool {
+    s.len() <= 64
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '.')
+        && s.contains(['_', '.'])
+        && identifier_hits(s).is_empty()
+}
+
 /// Replaces values and remembers what it replaced, for the leak scan.
 #[derive(Default)]
 pub struct Redactor {
     secrets: BTreeSet<String>,
     generated: BTreeSet<String>,
     counter: u32,
+    rules: Rules,
 }
 
 fn synth(kind: &str, len: usize, label: &str) -> String {
@@ -188,12 +339,54 @@ impl Redactor {
         Self::default()
     }
 
+    pub fn with_rules(rules: Rules) -> Self {
+        Self {
+            rules,
+            ..Self::default()
+        }
+    }
+
+    /// Changes the rules for what comes next. What was replaced so far stays remembered.
+    pub fn set_rules(&mut self, rules: Rules) {
+        self.rules = rules;
+    }
+
+    /// Whether everything under this name is hidden, whatever its children are called.
+    fn sensitive(&self, name: &str) -> bool {
+        match self.rules {
+            Rules::Diagnostics => is_sensitive(name),
+            Rules::Capture => capture_sensitive(name),
+            Rules::ShapeOnly => true,
+        }
+    }
+
+    /// Whether a value directly under this name is hidden.
+    fn hides(&self, name: &str) -> bool {
+        match self.rules {
+            Rules::Diagnostics => is_sensitive(name),
+            Rules::Capture => !capture_keeps(name),
+            Rules::ShapeOnly => true,
+        }
+    }
+
     /// A synthetic value shaped like `value` (redact-har.mjs `synthLike`). Empty stays empty.
     pub fn value(&mut self, value: &str, label: &str) -> String {
+        self.stand_in(value, label, true)
+    }
+
+    /// `secret` is false for a value hidden only because its name isn't on the capture's keep
+    /// list. It is replaced all the same, but an ordinary word like "connected" must not make the
+    /// leak scan stop the save when a kept field says the same word.
+    fn stand_in(&mut self, value: &str, label: &str, secret: bool) -> String {
         if value.is_empty() {
             return String::new();
         }
-        self.secrets.insert(value.to_string());
+        if secret {
+            self.secrets.insert(value.to_string());
+        }
+        if self.rules == Rules::ShapeOnly {
+            return HIDDEN.to_string();
+        }
         self.counter += 1;
         let n = self.counter;
         let v = value;
@@ -236,38 +429,46 @@ impl Redactor {
         let mut open: Vec<(String, bool)> = Vec::new();
         loop {
             let secret = open.last().is_some_and(|o| o.1);
-            let at = format!(
-                "{label}:{}",
-                open.last().map(|o| o.0.as_str()).unwrap_or("")
-            );
+            let inside = open.last().map(|o| o.0.clone()).unwrap_or_default();
+            let at = format!("{label}:{inside}");
+            // Stricter rules than the app's own reads: a value is checked by its own element too.
+            let strict = self.rules != Rules::Diagnostics;
+            let unlisted = strict && !secret && self.hides(&inside);
             let event = match reader.read_event().ok()? {
                 Event::Eof => break,
                 Event::Start(e) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-                    let hide = secret || is_sensitive(&name);
+                    let hide = secret || self.sensitive(&name);
                     let tag = self.xml_tag(&e, &name, hide, label)?;
                     open.push((name, hide));
                     Event::Start(tag)
                 }
                 Event::Empty(e) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
-                    let hide = secret || is_sensitive(&name);
+                    let hide = secret || self.sensitive(&name);
                     Event::Empty(self.xml_tag(&e, &name, hide, label)?)
                 }
                 Event::End(e) => {
                     open.pop()?;
                     Event::End(e)
                 }
-                Event::Text(t) if secret && !t.iter().all(u8::is_ascii_whitespace) => {
-                    let fake = self.value(&String::from_utf8_lossy(&t), &at);
+                Event::Text(t)
+                    if (secret || unlisted) && !t.iter().all(u8::is_ascii_whitespace) =>
+                {
+                    let fake = self.stand_in(&String::from_utf8_lossy(&t), &at, secret);
                     Event::Text(BytesText::from_escaped(fake))
                 }
-                Event::CData(c) if secret => {
-                    let fake = self.value(&String::from_utf8_lossy(&c), &at);
+                Event::Text(t) if strict && !t.iter().all(u8::is_ascii_whitespace) => {
+                    let kept = self.kept(&String::from_utf8_lossy(&t), &inside, &at, true);
+                    Event::Text(BytesText::from_escaped(kept))
+                }
+                // Under the stricter rules CDATA is free text wherever it sits.
+                Event::CData(c) if secret || strict => {
+                    let fake = self.stand_in(&String::from_utf8_lossy(&c), &at, secret);
                     Event::Text(BytesText::from_escaped(fake))
                 }
                 Event::Comment(_) | Event::DocType(_) | Event::PI(_) => continue,
-                Event::GeneralRef(_) if secret => continue,
+                Event::GeneralRef(_) if secret || unlisted => continue,
                 other => other,
             };
             writer.write_event(event).ok()?;
@@ -289,10 +490,14 @@ impl Redactor {
         for attr in tag.attributes() {
             let attr = attr.ok()?;
             let key = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-            let value = if hide || is_sensitive(&key) {
+            let at = format!("{label}:{name}@{key}");
+            let value = if hide || self.hides(&key) {
                 let raw = String::from_utf8_lossy(&attr.value).into_owned();
-                let at = format!("{label}:{name}@{key}");
-                Cow::Owned(self.value(&raw, &at).into_bytes())
+                let secret = hide || self.sensitive(&key);
+                Cow::Owned(self.stand_in(&raw, &at, secret).into_bytes())
+            } else if self.rules != Rules::Diagnostics {
+                let raw = String::from_utf8_lossy(&attr.value).into_owned();
+                Cow::Owned(self.kept(&raw, &key, &at, true).into_bytes())
             } else {
                 attr.value
             };
@@ -319,15 +524,20 @@ impl Redactor {
     /// Redacts a JSON value: every field under a sensitive key gets a synthetic value
     /// (numbers stay numbers), recursively.
     pub fn json(&mut self, v: &Value, label: &str) -> Value {
+        self.json_at(v, label, "")
+    }
+
+    /// `key` is the name the value sits under; a list's items sit under the list's name.
+    fn json_at(&mut self, v: &Value, label: &str, key: &str) -> Value {
         match v {
             Value::Object(m) => {
                 let mut out = Map::new();
                 for (k, x) in m {
                     let l = format!("{label}.{k}");
-                    let red = if is_sensitive(k) {
+                    let red = if self.sensitive(k) {
                         self.leaf_json(x, &l)
                     } else {
-                        self.json(x, &l)
+                        self.json_at(x, &l, k)
                     };
                     out.insert(k.clone(), red);
                 }
@@ -336,12 +546,45 @@ impl Redactor {
             Value::Array(a) => Value::Array(
                 a.iter()
                     .enumerate()
-                    .map(|(i, x)| self.json(x, &format!("{label}[{i}]")))
+                    .map(|(i, x)| self.json_at(x, &format!("{label}[{i}]"), key))
                     .collect(),
             ),
-            Value::String(s) => Value::String(self.xml(s, label)),
+            Value::String(s) => Value::String(match self.rules {
+                Rules::Diagnostics => self.xml(s, label),
+                _ if !self.hides(key) => self.kept(s, key, label, false),
+                // JSON-RPC names the object and the method it calls in a bare list.
+                _ if key == "params" && code_like(s) => s.clone(),
+                _ => self.stand_in(s, label, false),
+            }),
+            Value::Number(n) if self.rules != Rules::Diagnostics => {
+                let text = n.to_string();
+                if self.hides(key) || !identifier_hits(&text).is_empty() {
+                    let fake = self.stand_in(&text, label, false);
+                    fake.parse::<u64>()
+                        .map(Value::from)
+                        .unwrap_or(Value::String(fake))
+                } else {
+                    v.clone()
+                }
+            }
             other => other.clone(),
         }
+    }
+
+    /// A value the stricter rules let through: still no free text, and no identifier inside it.
+    fn kept(&mut self, text: &str, name: &str, label: &str, xml_leaf: bool) -> String {
+        if !xml_leaf && text.contains('<') {
+            return self.xml(text, label);
+        }
+        if !text.is_ascii() || text.contains('@') || text.len() > KEPT_MAX {
+            return self.stand_in(text, label, false);
+        }
+        // The leak scan lets a version and a band mask through by their XML name, so they stay.
+        let n = name.to_ascii_lowercase();
+        if xml_leaf && (n.ends_with("version") || n.ends_with("band")) {
+            return text.to_string();
+        }
+        redact_identifier_tokens(text).0
     }
 
     fn leaf_json(&mut self, v: &Value, label: &str) -> Value {

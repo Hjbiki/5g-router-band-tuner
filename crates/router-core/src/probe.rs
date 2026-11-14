@@ -140,7 +140,7 @@ fn field(
     usable.then(|| value.to_string())
 }
 
-fn model_field(text: &str) -> Option<String> {
+pub(crate) fn model_field(text: &str) -> Option<String> {
     static T: OnceLock<Regex> = OnceLock::new();
     static A: OnceLock<Regex> = OnceLock::new();
     field(
@@ -151,7 +151,7 @@ fn model_field(text: &str) -> Option<String> {
     )
 }
 
-fn hardware_field(text: &str) -> Option<String> {
+pub(crate) fn hardware_field(text: &str) -> Option<String> {
     static T: OnceLock<Regex> = OnceLock::new();
     static A: OnceLock<Regex> = OnceLock::new();
     field(
@@ -162,7 +162,7 @@ fn hardware_field(text: &str) -> Option<String> {
     )
 }
 
-fn firmware_field(text: &str) -> Option<String> {
+pub(crate) fn firmware_field(text: &str) -> Option<String> {
     static T: OnceLock<Regex> = OnceLock::new();
     static A: OnceLock<Regex> = OnceLock::new();
     field(
@@ -174,7 +174,7 @@ fn firmware_field(text: &str) -> Option<String> {
 }
 
 /// Router model names as they usually appear in a title or login realm.
-fn model_in_text(text: &str) -> Option<String> {
+pub(crate) fn model_in_text(text: &str) -> Option<String> {
     static M: OnceLock<Regex> = OnceLock::new();
     let m = re(
         &M,
@@ -184,7 +184,7 @@ fn model_in_text(text: &str) -> Option<String> {
 }
 
 /// A vendor named in page text or implied by its API paths. The first match wins.
-fn vendor_in(text: &str) -> Option<&'static str> {
+pub(crate) fn vendor_in(text: &str) -> Option<&'static str> {
     const VENDORS: &[(&str, &[&str])] = &[
         (
             "TP-Link",
@@ -211,7 +211,7 @@ fn vendor_in(text: &str) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
-fn title_of(html: &str) -> Option<String> {
+pub(crate) fn title_of(html: &str) -> Option<String> {
     static T: OnceLock<Regex> = OnceLock::new();
     let t = re(&T, r"(?is)<title[^>]*>(.*?)</title>");
     let text = t.captures(html)?.get(1)?.as_str().trim();
@@ -220,7 +220,7 @@ fn title_of(html: &str) -> Option<String> {
 }
 
 /// API-looking paths quoted in a page or script: they show which protocol the router speaks.
-fn api_paths_in(text: &str, out: &mut BTreeSet<String>) {
+pub(crate) fn api_paths_in(text: &str, out: &mut BTreeSet<String>) {
     static P: OnceLock<Regex> = OnceLock::new();
     let p = re(
         &P,
@@ -285,7 +285,7 @@ fn percent_decode(s: &str) -> String {
 
 /// Decoded until nothing changes, so double-encoding can't hide a name either. Each round that
 /// changes anything shortens the text, so this ends.
-fn fully_decoded(path: &str) -> String {
+pub(crate) fn fully_decoded(path: &str) -> String {
     let mut s = path.to_string();
     loop {
         let next = percent_decode(&s);
@@ -334,7 +334,7 @@ fn gunzip(bytes: &[u8]) -> Option<String> {
 }
 
 /// Routers often gzip whatever the request asked for (the H122 does).
-fn decode(bytes: &[u8]) -> String {
+pub(crate) fn decode(bytes: &[u8]) -> String {
     if bytes.starts_with(&[0x1f, 0x8b]) {
         if let Some(text) = gunzip(bytes) {
             return text;
@@ -506,7 +506,7 @@ pub async fn probe(base: &str) -> RouterFacts {
 }
 
 /// A version number or model name, which leak scans would mistake for an IP address.
-fn is_plain_label(s: &str) -> bool {
+pub(crate) fn is_plain_label(s: &str) -> bool {
     s.len() <= 48
         && !is_mac(s)
         && s.chars()
@@ -518,7 +518,7 @@ fn is_plain_label(s: &str) -> bool {
 
 /// A page's path, without what can identify a session: `;stok=...`, `key=value` and long or random
 /// looking segments become `*`.
-fn clean_path(path: &str) -> String {
+pub(crate) fn clean_path(path: &str) -> String {
     let segment = |s: &str| {
         let digits = s.bytes().filter(u8::is_ascii_digit).count();
         let random = s.len() >= 16 && digits >= 4;

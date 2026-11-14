@@ -3,6 +3,7 @@
 pub mod actor;
 pub mod apn;
 pub mod bands;
+pub mod capture;
 pub mod diagnostics;
 pub mod driver;
 pub mod drivers;
