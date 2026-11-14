@@ -9,8 +9,10 @@ vi.mock('../lib/backend', () => ({
     prepareRouterReport: vi.fn(),
     saveDiagnostics: vi.fn(),
     openRouterIssue: vi.fn(),
+    captureStatus: vi.fn(() => Promise.resolve({ phase: 'idle', requests: 0, limit: null })),
   },
   onRouterProbe: vi.fn(),
+  onCaptureStatus: vi.fn(() => Promise.resolve(() => {})),
 }))
 
 import { api, onRouterProbe } from '../lib/backend'
@@ -80,6 +82,13 @@ describe('UnsupportedRouter', () => {
     await waitFor(() => expect(api.saveDiagnostics).toHaveBeenCalledOnce())
     await fireEvent.click(screen.getByRole('button', { name: t('unsupported.openIssue') }))
     expect(api.openRouterIssue).toHaveBeenCalledOnce()
+  })
+
+  it('offers a recording of the router page as well, which is what a driver needs', async () => {
+    render(UnsupportedRouter)
+    await waitFor(() => expect(title()).toBeTruthy())
+    expect(screen.getByRole('heading', { name: new RegExp(t('recording.title')) })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('recording.start') })).toBeTruthy()
   })
 
   it('shows a privacy stop, and can be dismissed', async () => {

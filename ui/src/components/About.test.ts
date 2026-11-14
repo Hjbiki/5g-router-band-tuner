@@ -12,8 +12,10 @@ vi.mock('../lib/backend', () => ({
     updateStatus: vi.fn(() => Promise.resolve({ current: '9.9.9', available: null })),
     requestFactoryReset: vi.fn(),
     confirmFactoryReset: vi.fn(),
+    captureStatus: vi.fn(() => Promise.resolve({ phase: 'idle', requests: 0, limit: null })),
   },
   onUpdate: vi.fn(() => Promise.resolve(() => {})),
+  onCaptureStatus: vi.fn(() => Promise.resolve(() => {})),
 }))
 
 import { api } from '../lib/backend'
@@ -41,6 +43,12 @@ describe('About', () => {
     render(About)
     expect(screen.getByRole('link', { name: 'عناد عسكر' })).toBeTruthy()
     setLanguage('en')
+  })
+
+  it('offers a recording of the router page beside Export diagnostics', () => {
+    render(About)
+    expect(screen.getByRole('heading', { name: new RegExp(t('recording.title')) })).toBeTruthy()
+    expect(screen.getByRole('button', { name: t('recording.start') })).toBeTruthy()
   })
 
   it('leaves the router tools to the Router page', () => {

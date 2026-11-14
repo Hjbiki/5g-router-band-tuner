@@ -7,6 +7,9 @@ import type { ApplyPreview } from './bindings/ApplyPreview'
 import type { AppSnapshot } from './bindings/AppSnapshot'
 import type { AutoSpeedTestStatus } from './bindings/AutoSpeedTestStatus'
 import type { BandOutcome } from './bindings/BandOutcome'
+import type { CapturePreview } from './bindings/CapturePreview'
+import type { CaptureRefusal } from './bindings/CaptureRefusal'
+import type { CaptureStatus } from './bindings/CaptureStatus'
 import type { Bucket } from './bindings/Bucket'
 import type { CredentialStatus } from './bindings/CredentialStatus'
 import type { CsvLabels } from './bindings/CsvLabels'
@@ -119,6 +122,17 @@ export const api = {
   /** Opens a save dialog (or a folder picker for all four); `cancelled` when the user backs out. */
   exportHistoryCsv: (opts: ExportOptions, labels: CsvLabels) =>
     invoke<ExportOutcome>('export_history_csv', { opts, labels }),
+  // Recording the router's own page
+  /** Opens the router's page in the recording window. A reason comes back when it can't start. */
+  captureStart: (title: string) => invoke<CaptureRefusal | null>('capture_start', { title }),
+  captureStatus: () => invoke<CaptureStatus>('capture_status'),
+  /** Ends the recording and returns what would be saved. Nothing is written. */
+  captureStop: () => invoke<CapturePreview>('capture_stop'),
+  /** Builds the file again, with or without the router's own scripts. */
+  capturePreview: (includeCode: boolean) => invoke<CapturePreview>('capture_preview', { includeCode }),
+  /** Opens a save dialog; false when the user backs out. After a save the recording is forgotten. */
+  captureSave: () => invoke<boolean>('capture_save'),
+  captureDiscard: () => invoke<void>('capture_discard'),
 }
 
 export function onSnapshot(cb: (s: AppSnapshot) => void): Promise<() => void> {
@@ -131,6 +145,11 @@ export function onAlert(cb: (a: Alert) => void): Promise<() => void> {
 
 export function onRouterProbe(cb: (v: ProbeView | null) => void): Promise<() => void> {
   return listen<ProbeView | null>('router-probe', (e) => cb(e.payload))
+}
+
+/** The recording moved on: opened, stopped, saved, thrown away, or its window was closed. */
+export function onCaptureStatus(cb: (s: CaptureStatus) => void): Promise<() => void> {
+  return listen<CaptureStatus>('capture-status', (e) => cb(e.payload))
 }
 
 export function onUpdate(cb: (v: UpdateView) => void): Promise<() => void> {

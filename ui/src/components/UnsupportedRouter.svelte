@@ -11,6 +11,7 @@
   import { t } from '../lib/i18n'
   import { errorText } from '../lib/errors'
   import { ensureRouterProbe, routerProbe } from '../lib/routerProbe.svelte'
+  import RouterRecording from './RouterRecording.svelte'
 
   onMount(() => {
     void ensureRouterProbe()
@@ -102,6 +103,9 @@
       </ol>
     {/if}
     {#if error}<p class="err" role="alert">{error}</p>{/if}
+    <!-- The report above only has what the router shows before login, which often isn't even
+         its model. A recording has what a driver needs. -->
+    <div class="more"><RouterRecording /></div>
   </section>
 {/if}
 
@@ -206,5 +210,10 @@
   }
   .err {
     color: var(--q-poor);
+  }
+  .more {
+    margin-block-start: 4px;
+    padding-block-start: 12px;
+    border-block-start: 1px solid var(--border);
   }
 </style>

@@ -1431,6 +1431,45 @@
     "save": "Save file…",
     "saved": "Diagnostics saved."
   },
+  "recording": {
+    "title": "Record how your router works",
+    "body": "Opens your router's own page in a window and records what that page asks the router. A developer can add your model from the file.",
+    "help": "The window can only reach your router. It can't reach the internet or this app, and it is closed and forgotten afterwards.",
+    "start": "Record…",
+    "windowTitle": "Recording: your router's page",
+    "before1": "Log in there and change bands, as you normally would.",
+    "before2": "What you change there is real, and this app can't undo it. Don't press Reset, Restart or Update.",
+    "before3": "Nothing is sent anywhere. You see the file before you save it.",
+    "passwordSafe": "It's safe to type your password: everything a login sends is hidden.",
+    "begin": "Open the router's page",
+    "cancel": "Cancel",
+    "running": "Recording: {n} requests",
+    "stop": "Stop and review",
+    "discard": "Discard",
+    "limit": {
+      "requests": "It stopped taking more at 500 requests.",
+      "size": "It stopped taking more: the recording is full.",
+      "time": "It stopped taking more after 15 minutes."
+    },
+    "closed": "The window was closed, so the recording was thrown away.",
+    "reviewTitle": "Check the file before you share it",
+    "reviewBody": "Passwords, names and addresses are removed. Only you know what else is private, so read it first.",
+    "requests": "{n} requests",
+    "truncated": "This is the start of the file. The saved file is complete.",
+    "includeCode": "Include the router's script files",
+    "includeCodeHelp": "They help a developer most. They are the router maker's code, and a GitHub issue is public.",
+    "save": "Save file…",
+    "saved": "Recording saved.",
+    "savedNext": "Saved. Attach the file to a GitHub issue.",
+    "blocked": "The privacy check found {what}, so nothing can be saved.",
+    "refused": {
+      "loggedIn": "Log out of the app first, on the Router page.",
+      "busy": "Wait for the band change, scan or speed test to finish.",
+      "demo": "The demo router has no page to record.",
+      "alreadyOpen": "A recording is already open.",
+      "badAddress": "The router's address in Settings isn't valid."
+    }
+  },
   "pageScripts": {
     "title": "Router page scripts",
     "body": "Saves the router's own web page code to a zip file on this PC, so the exact factory reset and APN calls can be read from the firmware. The app only reads pages from the router (GET requests), changes nothing on it, and sends nothing anywhere else.",

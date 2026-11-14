@@ -7,6 +7,7 @@
   import { api } from '../lib/backend'
   import { t } from '../lib/i18n'
   import DiagnosticsExport from './DiagnosticsExport.svelte'
+  import RouterRecording from './RouterRecording.svelte'
   import UpdateCard from './UpdateCard.svelte'
 
   let version = $state(pkg.version)
@@ -50,6 +51,7 @@
     <div class="card diagnostics">
       <h2><FileDown size={18} aria-hidden="true" />{t('diagnostics.title')}</h2>
       <DiagnosticsExport />
+      <div class="more"><RouterRecording /></div>
     </div>
 
     <div class="card wide">
@@ -86,6 +88,10 @@
   }
   .wide {
     grid-column: 1 / -1;
+  }
+  .more {
+    padding-block-start: 12px;
+    border-block-start: 1px solid var(--border);
   }
   @media (max-width: 860px) {
     .cards {
