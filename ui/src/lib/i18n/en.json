@@ -1434,11 +1434,11 @@
   "recording": {
     "title": "Record how your router works",
     "body": "Opens your router's own page in a window and records what that page asks the router. A developer can add your model from the file.",
-    "help": "The window can only reach your router. It can't reach the internet or this app, and it is closed and forgotten afterwards.",
+    "help": "The window can only reach your router, not the internet or this app, and it is forgotten afterwards. To finish, press Stop and review in either window, or just close that one.",
     "start": "Record…",
-    "windowTitle": "Recording: your router's page",
-    "before1": "Log in there and change bands, as you normally would.",
-    "before2": "What you change there is real, and this app can't undo it. Don't press Reset, Restart or Update.",
+    "windowTitle": "Recording: close this window when you're done",
+    "before1": "Log in there and look around: device information, mobile network, signal. You don't need to change anything.",
+    "before2": "If you do change something, it's real and this app can't undo it. Don't press Reset, Restart or Update.",
     "before3": "Nothing is sent anywhere. You see the file before you save it.",
     "passwordSafe": "It's safe to type your password: everything a login sends is hidden.",
     "begin": "Open the router's page",
@@ -1451,7 +1451,6 @@
       "size": "It stopped taking more: the recording is full.",
       "time": "It stopped taking more after 15 minutes."
     },
-    "closed": "The window was closed, so the recording was thrown away.",
     "reviewTitle": "Check the file before you share it",
     "reviewBody": "Passwords, names and addresses are removed. Only you know what else is private, so read it first.",
     "requests": "{n} requests",

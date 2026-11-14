@@ -124,7 +124,8 @@ export const api = {
     invoke<ExportOutcome>('export_history_csv', { opts, labels }),
   // Recording the router's own page
   /** Opens the router's page in the recording window. A reason comes back when it can't start. */
-  captureStart: (title: string) => invoke<CaptureRefusal | null>('capture_start', { title }),
+  captureStart: (title: string, stopLabel: string) =>
+    invoke<CaptureRefusal | null>('capture_start', { title, stopLabel }),
   captureStatus: () => invoke<CaptureStatus>('capture_status'),
   /** Ends the recording and returns what would be saved. Nothing is written. */
   captureStop: () => invoke<CapturePreview>('capture_stop'),

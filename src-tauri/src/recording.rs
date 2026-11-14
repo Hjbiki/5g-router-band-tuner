@@ -3,8 +3,11 @@
 //! `router_core::capture` is the cleaning.
 //!
 //! Nothing is ever sent anywhere. What was recorded lives in memory only, until the user saves the
-//! cleaned file themselves or it is thrown away: by Discard, by closing the window, or by closing
-//! the app.
+//! cleaned file themselves or it is thrown away: by Discard, or by closing the app.
+//!
+//! A recording ends from either window: Stop in the main window, or the recording window's own
+//! Stop item or its X. Each leads to the review. Closing the window is how most people say
+//! "done", so it must not cost them what they recorded.
 //!
 //! A recording is refused while the app itself is talking to the router. The app's own session,
 //! its polling and its band watchdog would mix into what is recorded, and the watchdog could undo
@@ -28,6 +31,8 @@ pub const EVENT: &str = "capture-status";
 const PREVIEW_BYTES: usize = 256 * 1024;
 const FILE_NAME: &str = "router-band-tuner-recording.json";
 const TITLE_MAX: usize = 80;
+/// What the window's Stop item says when the main window gave it no text.
+const STOP_TEXT: &str = "Stop";
 
 struct Stopped {
     exchanges: Arc<Vec<Exchange>>,
@@ -59,6 +64,31 @@ impl CaptureState {
     /// Nothing is open, and nothing is waiting to be saved or thrown away.
     pub fn is_idle(&self) -> bool {
         matches!(*self.lock(), Flow::Idle)
+    }
+
+    /// The window of an open recording is gone: `finish` ends it, and what it hands over waits
+    /// for the review. False when no recording was open (Stop or Discard already took it).
+    fn keep_closed(
+        &self,
+        finish: impl FnOnce(Recording) -> (Vec<Exchange>, Option<Limit>),
+    ) -> bool {
+        let recording = {
+            let mut flow = self.lock();
+            match std::mem::take(&mut *flow) {
+                Flow::Open(recording) => recording,
+                other => {
+                    *flow = other;
+                    return false;
+                }
+            }
+        };
+        let (exchanges, limit) = finish(recording);
+        *self.lock() = Flow::Stopped(Stopped {
+            exchanges: Arc::new(exchanges),
+            limit,
+            built: None,
+        });
+        true
     }
 
     fn status(&self) -> CaptureStatus {
@@ -248,12 +278,22 @@ async fn preview(
     })
 }
 
-/// Opens the router's own page in the recording window. `title` is the window's title, in the
-/// user's language. `Ok(Some(why))` when it can't start now.
+/// A window's title or a menu item's text from the main window: one short line.
+fn short_line(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(TITLE_MAX)
+        .collect()
+}
+
+/// Opens the router's own page in the recording window. `title` is the window's title and
+/// `stop_label` the text of its Stop item, in the user's language. `Ok(Some(why))` when it can't
+/// start now.
 #[tauri::command]
 pub async fn capture_start(
     app: AppHandle,
     title: String,
+    stop_label: String,
     state: State<'_, AppState>,
     cap: State<'_, CaptureState>,
     scan: State<'_, crate::autoscan::ScanState>,
@@ -272,12 +312,12 @@ pub async fn capture_start(
     let Ok(router) = Url::parse(&format!("http://{host}/")) else {
         return Ok(Some(CaptureRefusal::BadAddress));
     };
-    let title: String = title
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(TITLE_MAX)
-        .collect();
-    let recording = capture_window::open(&app, &router, state.data_dir(), &title, true)
+    let title = short_line(&title);
+    let mut stop = short_line(&stop_label);
+    if stop.trim().is_empty() {
+        stop = STOP_TEXT.to_string();
+    }
+    let recording = capture_window::open(&app, &router, state.data_dir(), &title, &stop, true)
         .map_err(CmdError::Message)?;
     *cap.lock() = Flow::Open(recording);
     emit(&app, &cap);
@@ -372,23 +412,31 @@ pub fn capture_discard(app: AppHandle, cap: State<'_, CaptureState>) {
     emit(&app, &cap);
 }
 
-/// The recording window was closed. If a recording was open in it, closing it by hand throws
-/// the recording away: nothing may outlive the window without the user asking for it.
+/// The recording window was closed while its recording was open: by its Stop item, by its X or
+/// by Windows. That ends the recording and keeps it for the review, as Stop in the main window
+/// does, and brings the main window back, because the review is there. Nothing is cleaned here:
+/// this runs on the window's thread, and the review asks for the cleaning.
 pub fn window_closed(app: &AppHandle) {
     let Some(cap) = app.try_state::<CaptureState>() else {
         return;
     };
-    let taken = {
-        let mut flow = cap.lock();
-        if !matches!(*flow, Flow::Open(_)) {
-            return;
-        }
-        std::mem::take(&mut *flow)
+    if !cap.keep_closed(|recording| recording.finish(app)) {
+        return;
+    }
+    emit(app, &cap);
+    crate::tray::show_main(app);
+}
+
+/// The app is closing: a recording still open is thrown away now, so its window going away
+/// isn't taken for "stop and review".
+pub fn app_exiting(app: &AppHandle) {
+    let Some(cap) = app.try_state::<CaptureState>() else {
+        return;
     };
+    let taken = std::mem::take(&mut *cap.lock());
     if let Flow::Open(recording) = taken {
         drop(recording.finish(app));
     }
-    emit(app, &cap);
 }
 
 #[cfg(test)]
@@ -485,5 +533,50 @@ mod tests {
         assert_eq!(cap.status().phase, CapturePhase::Stopped);
         *cap.lock() = Flow::Idle;
         assert!(cap.is_idle());
+    }
+
+    #[test]
+    fn closing_the_window_keeps_the_recording_for_its_review() {
+        // The window's Stop item and its X both end here. What was recorded must not be lost.
+        let router = Url::parse("http://192.168.8.1/").unwrap();
+        let cap = CaptureState::default();
+        *cap.lock() = Flow::Open(Recording::detached(&router));
+        let mut finished = 0;
+        assert!(cap.keep_closed(|_| {
+            finished += 1;
+            (Vec::new(), Some(Limit::Time))
+        }));
+        assert_eq!(finished, 1);
+        assert_eq!(
+            cap.status(),
+            CaptureStatus {
+                phase: CapturePhase::Stopped,
+                requests: 0,
+                limit: Some(Limit::Time),
+            }
+        );
+        assert!(!cap.is_idle());
+    }
+
+    #[test]
+    fn a_window_that_closes_after_stop_or_discard_changes_nothing() {
+        // Stop and Discard close the window themselves: its going away must not undo them.
+        let cap = CaptureState::default();
+        assert!(!cap.keep_closed(|_| unreachable!("nothing is open")));
+        assert!(cap.is_idle());
+        *cap.lock() = Flow::Stopped(Stopped {
+            exchanges: Arc::new(Vec::new()),
+            limit: None,
+            built: Some("the cleaned file".into()),
+        });
+        assert!(!cap.keep_closed(|_| unreachable!("nothing is open")));
+        assert!(matches!(&*cap.lock(), Flow::Stopped(s) if s.built.is_some()));
+    }
+
+    #[test]
+    fn what_the_main_window_sends_for_the_window_is_one_short_line() {
+        assert_eq!(short_line("Stop and\nreview\u{7}"), "Stop andreview");
+        assert_eq!(short_line(&"x".repeat(500)).len(), TITLE_MAX);
+        assert_eq!(short_line("أوقف وراجع"), "أوقف وراجع");
     }
 }

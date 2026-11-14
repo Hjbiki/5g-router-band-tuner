@@ -18,7 +18,8 @@ vi.mock('../lib/backend', () => ({
 
 import { api, onCaptureStatus } from '../lib/backend'
 import { setLanguage, t } from '../lib/i18n'
-import { resetRecording } from '../lib/recording.svelte'
+import { recording, resetRecording, takeCaptureStatus } from '../lib/recording.svelte'
+import { app } from '../lib/store.svelte'
 import { resetRouterProbe, routerProbe } from '../lib/routerProbe.svelte'
 import RouterRecording from './RouterRecording.svelte'
 import type { CapturePreview } from '../lib/bindings/CapturePreview'
@@ -60,6 +61,7 @@ describe('RouterRecording', () => {
   beforeEach(() => {
     resetRecording()
     resetRouterProbe()
+    app.tab = 'dashboard'
     setLanguage('en')
     vi.mocked(onCaptureStatus).mockImplementation(async (cb) => {
       emit = cb
@@ -96,7 +98,10 @@ describe('RouterRecording', () => {
     await mounted(idle)
     vi.mocked(api.captureStatus).mockResolvedValue(running)
     await begin()
-    await waitFor(() => expect(api.captureStart).toHaveBeenCalledWith(t('recording.windowTitle')))
+    // The window's title and the text of its own Stop item, both in the user's language.
+    await waitFor(() =>
+      expect(api.captureStart).toHaveBeenCalledWith(t('recording.windowTitle'), t('recording.stop')),
+    )
     await waitFor(() => expect(screen.getByText(t('recording.running', { n: '12' }))).toBeTruthy())
     expect(button('recording.stop')).toBeTruthy()
     expect(noButton('recording.start')).toBeNull()
@@ -216,15 +221,51 @@ describe('RouterRecording', () => {
     await fireEvent.click(button('recording.discard'))
     await waitFor(() => expect(api.captureDiscard).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(button('recording.start')).toBeTruthy())
-    // Discarding is the user's own doing: no "the window was closed" note.
-    expect(screen.queryByText(t('recording.closed'))).toBeNull()
   })
 
-  it('says the recording was thrown away when its window is closed by hand', async () => {
+  it('shows the review when the recording is ended from its own window', async () => {
+    // The window's Stop item and its X both end the recording there: the backend only says so.
+    const scrolled = vi.fn()
+    Element.prototype.scrollIntoView = scrolled
+    vi.mocked(api.capturePreview).mockResolvedValue(preview)
     await mounted(running)
-    emit(idle)
-    await waitFor(() => expect(screen.getByText(t('recording.closed'))).toBeTruthy())
-    expect(button('recording.start')).toBeTruthy()
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    emit(stopped)
+    const box = (await screen.findByRole('textbox')) as HTMLTextAreaElement
+    expect(box.value).toBe(preview.text)
+    expect(api.capturePreview).toHaveBeenCalledWith(false)
+    expect(api.captureStop).not.toHaveBeenCalled()
+    expect(button('recording.save')).toBeTruthy()
+    // It is brought into view, and the page isn't changed: the review is already on it.
+    await waitFor(() => expect(scrolled).toHaveBeenCalled())
+    expect(app.tab).toBe('dashboard')
+  })
+
+  it('opens About when a recording ends while no page is showing it', async () => {
+    takeCaptureStatus(running)
+    expect(recording.places).toBe(0)
+    takeCaptureStatus(stopped)
+    expect(app.tab).toBe('about')
+  })
+
+  it('leaves the page alone for anything but a recording that just ended', async () => {
+    takeCaptureStatus(running)
+    takeCaptureStatus(idle)
+    expect(app.tab).toBe('dashboard')
+    // One that was already waiting when the app looked: the user comes to it when they like.
+    takeCaptureStatus(stopped)
+    expect(app.tab).toBe('dashboard')
+  })
+
+  it('tells people to look around, not to change bands: most routers have no band page', async () => {
+    await mounted(idle)
+    await fireEvent.click(button('recording.start'))
+    for (const lang of ['en', 'ar'] as const) {
+      setLanguage(lang)
+      const first = t('recording.before1')
+      expect(first).not.toMatch(/change bands|غيّر النطاقات/)
+      await waitFor(() => expect(screen.getByText(first)).toBeTruthy())
+    }
   })
 
   it('picks up a recording that is waiting for its review', async () => {

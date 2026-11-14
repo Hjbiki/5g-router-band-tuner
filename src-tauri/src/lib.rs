@@ -54,7 +54,7 @@ pub fn run() {
                     tray::hide_to_tray(window.app_handle());
                 }
             }
-            // Closing the recording window by hand throws its recording away.
+            // Closing the recording window ends the recording and keeps it for its review.
             if matches!(event, WindowEvent::Destroyed) && window.label() == capture_window::LABEL {
                 recording::window_closed(window.app_handle());
             }
@@ -183,6 +183,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building 5G Router Band Tuner")
         .run(|app, event| {
+            // Quitting throws an open recording away, before its window goes.
+            if let RunEvent::ExitRequested { code: Some(_), .. } = event {
+                recording::app_exiting(app);
+            }
             if let RunEvent::Exit = event {
                 if let Some(state) = app.try_state::<commands::AppState>() {
                     state.finish_ip_refresh_at_exit();

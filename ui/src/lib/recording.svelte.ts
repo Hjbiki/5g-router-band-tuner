@@ -1,6 +1,7 @@
 import type { CapturePreview } from './bindings/CapturePreview'
 import type { CaptureStatus } from './bindings/CaptureStatus'
 import { api, onCaptureStatus } from './backend'
+import { app } from './store.svelte'
 
 const IDLE: CaptureStatus = { phase: 'idle', requests: 0, limit: null }
 
@@ -12,17 +13,17 @@ export const recording: {
   status: CaptureStatus
   /** The cleaned file's start and size, exactly as it would be saved. */
   preview: CapturePreview | null
-  /** The window was closed while recording, which throws the recording away. */
-  closedByHand: boolean
-} = $state({ status: IDLE, preview: null, closedByHand: false })
+  /** How many places on screen show the recording right now (the notice, About). */
+  places: number
+} = $state({ status: IDLE, preview: null, places: 0 })
 
 /**
- * A status from the backend. A recording that ends without Stop or Discard was closed by hand;
- * `byUser` is true when this window asked for the change itself.
+ * A status from the backend. A recording can end from its own window (its Stop item, or its X),
+ * and then its review must be in front of the user: when no page is showing it, About opens.
  */
-export function takeCaptureStatus(next: CaptureStatus, byUser = false): void {
-  if (recording.status.phase === 'recording' && next.phase === 'idle' && !byUser) recording.closedByHand = true
-  if (next.phase !== 'idle') recording.closedByHand = false
+export function takeCaptureStatus(next: CaptureStatus): void {
+  const ended = recording.status.phase === 'recording' && next.phase === 'stopped'
+  if (ended && recording.places === 0) app.tab = 'about'
   if (next.phase !== 'stopped') recording.preview = null
   recording.status = next
 }
@@ -44,5 +45,5 @@ export function resetRecording(): void {
   started = null
   recording.status = IDLE
   recording.preview = null
-  recording.closedByHand = false
+  recording.places = 0
 }

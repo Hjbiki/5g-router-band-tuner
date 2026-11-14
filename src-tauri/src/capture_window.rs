@@ -16,12 +16,18 @@
 //!   made for this recording and deleted after it: no cookies come in, and none stay.
 //! - It can open no other window, download nothing, get no permission (camera, location and the
 //!   like), and can't leave the router's address.
+//!
+//! The one control on the window that isn't the router's is a menu item that ends the recording.
+//! It is a native menu, the app's own: the router's page can neither draw there nor press it.
+//! Pressing it closes the window, and whoever opened the window decides what a closed window
+//! means (the app keeps the recording for its review).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use router_core::capture::{Ask, Exchange, Limit, Recorder};
+use tauri::menu::{Menu, MenuItem};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
 #[cfg(windows)]
@@ -39,6 +45,8 @@ use windows_core::{HSTRING, PWSTR};
 
 /// The window's label. No capability names it, which is part of the seal.
 pub const LABEL: &str = "capture";
+/// The menu item that ends the recording.
+pub const STOP_ID: &str = "capture-stop";
 /// A recording stops taking more after this long.
 pub const TIME_LIMIT: Duration = Duration::from_secs(15 * 60);
 const PROFILE_PREFIX: &str = "capture-profile-";
@@ -101,6 +109,16 @@ pub struct Recording {
 }
 
 impl Recording {
+    /// A recording with no window, for the tests of what happens around one.
+    #[cfg(test)]
+    pub(crate) fn detached(router: &Url) -> Self {
+        Self {
+            router: router.clone(),
+            recorder: Arc::new(Mutex::new(Recorder::new(router).expect("a web address"))),
+            profile: PathBuf::new(),
+        }
+    }
+
     /// How many requests are recorded so far, and the limit that stopped it, if one did.
     pub fn progress(&self) -> (usize, Option<Limit>) {
         let recorder = lock(&self.recorder);
@@ -134,20 +152,22 @@ impl Recording {
 }
 
 /// Opens the recording window on the router's own page. `profiles` is a folder for this
-/// recording's browser profile; `title` is the window's title, in the user's language. The
-/// window is shown to a person; a test harness keeps it hidden.
+/// recording's browser profile; `title` is the window's title and `stop` the text of the menu
+/// item that ends the recording, both in the user's language. The window is shown to a person;
+/// a test harness keeps it hidden.
 pub fn open<R: Runtime>(
     app: &AppHandle<R>,
     router: &Url,
     profiles: &Path,
     title: &str,
+    stop: &str,
     visible: bool,
 ) -> Result<Recording, String> {
     // The recorder listens through WebView2. A window that couldn't be recorded isn't opened.
     #[cfg(not(windows))]
     return Err("recording needs Windows".to_string());
     #[cfg(windows)]
-    open_sealed(app, router, profiles, title, visible)
+    open_sealed(app, router, profiles, title, stop, visible)
 }
 
 #[cfg(windows)]
@@ -156,6 +176,7 @@ fn open_sealed<R: Runtime>(
     router: &Url,
     profiles: &Path,
     title: &str,
+    stop: &str,
     visible: bool,
 ) -> Result<Recording, String> {
     let args = browser_args(router).ok_or("the router's address isn't a web address")?;
@@ -166,6 +187,9 @@ fn open_sealed<R: Runtime>(
         .map_or(0, |d| d.as_millis());
     let profile = profiles.join(format!("{PROFILE_PREFIX}{}-{stamp}", std::process::id()));
     let origin = router.origin().ascii_serialization();
+    let stop =
+        MenuItem::with_id(app, STOP_ID, stop, true, None::<&str>).map_err(|e| e.to_string())?;
+    let menu = Menu::with_items(app, &[&stop]).map_err(|e| e.to_string())?;
 
     let window = WebviewWindowBuilder::new(
         app,
@@ -175,6 +199,12 @@ fn open_sealed<R: Runtime>(
     .title(title)
     .visible(visible)
     .inner_size(1100.0, 760.0)
+    .menu(menu)
+    .on_menu_event(|window, event| {
+        if event.id().as_ref() == STOP_ID {
+            let _ = window.close();
+        }
+    })
     .data_directory(profile.clone())
     .additional_browser_args(&args)
     .devtools(false)

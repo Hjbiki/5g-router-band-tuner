@@ -11,10 +11,11 @@
 //!   cargo rustc -p router-band-tuner --example capture_harness -- \
 //!     -C link-arg=/MANIFEST:EMBED \
 //!     -C link-arg=/MANIFESTINPUT:<full path to src-tauri\examples\common-controls.manifest>
-//!   target\debug\examples\capture_harness.exe [show] [close]
+//!   target\debug\examples\capture_harness.exe [show] [close | stop]
 //!
 //! Run it from `src-tauri`. Without `show` the window stays hidden. With `close` the recording
-//! is ended the way a person closing the window with X ends it.
+//! is ended the way a person closing the window with X ends it, and with `stop` by the window's
+//! own Stop item, pressed the way Windows reports a click on it.
 //!
 //! It prints one `CHECK` line per check and ends with `HARNESS PASSED` or `HARNESS FAILED`.
 
@@ -33,6 +34,51 @@ static OPEN: Mutex<Option<capture_window::Recording>> = Mutex::new(None);
 /// What that event got out of it.
 type Finished = (Vec<capture::Exchange>, Option<capture::Limit>);
 static CLOSED: Mutex<Option<mpsc::Sender<Finished>>> = Mutex::new(None);
+
+/// What the window's Stop item is told to say.
+const STOP_TEXT: &str = "Stop and review";
+
+/// The window's menu, as Windows has it.
+mod menu {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetMenu(hwnd: isize) -> isize;
+        fn GetMenuItemCount(menu: isize) -> i32;
+        fn GetMenuItemID(menu: isize, position: i32) -> u32;
+        fn GetMenuStringW(menu: isize, item: u32, text: *mut u16, max: i32, flags: u32) -> i32;
+        fn PostMessageW(hwnd: isize, message: u32, wparam: usize, lparam: isize) -> i32;
+    }
+    const WM_COMMAND: u32 = 0x0111;
+    const MF_BYPOSITION: u32 = 0x0400;
+
+    /// The text of the window's only menu item, and the command a click on it sends.
+    pub fn only_item(hwnd: isize) -> Result<(String, u32), String> {
+        // SAFETY: plain reads of a window's menu; a dead window just answers "no menu".
+        unsafe {
+            let menu = GetMenu(hwnd);
+            if menu == 0 {
+                return Err("the window has no menu".into());
+            }
+            let count = GetMenuItemCount(menu);
+            if count != 1 {
+                return Err(format!("the menu has {count} items"));
+            }
+            let id = GetMenuItemID(menu, 0);
+            if id == u32::MAX {
+                return Err("the item opens a submenu".into());
+            }
+            let mut text = [0u16; 128];
+            let len = GetMenuStringW(menu, 0, text.as_mut_ptr(), text.len() as i32, MF_BYPOSITION);
+            Ok((String::from_utf16_lossy(&text[..len.max(0) as usize]), id))
+        }
+    }
+
+    /// Presses a menu item the way Windows reports a click on it: by its command.
+    pub fn press(hwnd: isize, id: u32) -> bool {
+        // SAFETY: posts one message to a window of this process.
+        unsafe { PostMessageW(hwnd, WM_COMMAND, id as usize, 0) != 0 }
+    }
+}
 
 /// Set only if the app command's body runs: a router's page must never get this far.
 static SECRET_RAN: AtomicBool = AtomicBool::new(false);
@@ -213,9 +259,11 @@ fn serve(mock: &Mock, mut stream: TcpStream) {
 
 fn main() {
     let show = std::env::args().any(|a| a == "show");
-    // `close`: end the recording the way a person closing the window with X does. The window's
-    // own "destroyed" event then finishes it, on the main thread, as the app does.
-    let by_hand = std::env::args().any(|a| a == "close");
+    // `close`: end the recording the way a person closing the window with X does. `stop`: by
+    // the window's own Stop item. Either way the window's "destroyed" event then finishes it, on
+    // the main thread, as the app does.
+    let by_item = std::env::args().any(|a| a == "stop");
+    let by_hand = by_item || std::env::args().any(|a| a == "close");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a local port");
     let port = listener.local_addr().unwrap().port();
     let (done_tx, done_rx) = mpsc::channel::<String>();
@@ -257,8 +305,14 @@ fn main() {
             }
         })
         .setup(move |app| {
-            let recording =
-                capture_window::open(app.handle(), &router, &profiles, "capture harness", show)?;
+            let recording = capture_window::open(
+                app.handle(),
+                &router,
+                &profiles,
+                "capture harness",
+                STOP_TEXT,
+                show,
+            )?;
             let handle = app.handle().clone();
             let other = format!("localhost:{port}");
             std::thread::spawn(move || {
@@ -269,24 +323,47 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(2500));
                 let later: Vec<String> = done_rx.try_iter().collect();
                 let (seen_so_far, _) = recording.progress();
+                let window = tauri::Manager::get_webview_window(&handle, capture_window::LABEL);
+                let hwnd = window
+                    .as_ref()
+                    .and_then(|w| w.hwnd().ok())
+                    .map_or(0, |h| h.0 as isize);
+                // The window's one control of its own, read before anything ends.
+                let item = menu::only_item(hwnd);
                 let (exchanges, limit) = if by_hand {
                     let (tx, rx) = mpsc::channel();
                     *CLOSED.lock().unwrap() = Some(tx);
                     *OPEN.lock().unwrap() = Some(recording);
-                    if let Some(window) = tauri::Manager::get_webview_window(&handle, capture_window::LABEL) {
-                        let _ = window.close();
-                    }
+                    let asked = match (&item, by_item) {
+                        (Ok((_, id)), true) => menu::press(hwnd, *id),
+                        (Err(_), true) => false,
+                        (_, false) => window.is_some_and(|w| w.close().is_ok()),
+                    };
+                    let how = if by_item {
+                        "the window's Stop item ended the recording"
+                    } else {
+                        "closing the window by hand ended the recording"
+                    };
                     // A hang in that event would show here as no answer.
-                    rx.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| {
-                        println!("CHECK FAIL closing the window by hand ended the recording: no answer in 15 s");
+                    let got = rx.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| {
+                        println!("CHECK FAIL {how}: asked {asked}, no answer in 15 s");
                         println!("HARNESS FAILED");
                         std::process::exit(1);
-                    })
+                    });
+                    println!("CHECK ok   {how}");
+                    got
                 } else {
                     recording.finish(&handle)
                 };
-                if by_hand {
-                    println!("CHECK ok   closing the window by hand ended the recording");
+                match &item {
+                    Ok((text, _)) if text == STOP_TEXT => {
+                        println!("CHECK ok   the window has one control of its own, and it says what it was given");
+                    }
+                    other => {
+                        println!("CHECK FAIL the window has one control of its own, and it says what it was given: {other:?}");
+                        println!("HARNESS FAILED");
+                        std::process::exit(1);
+                    }
                 }
                 let built = capture::build(
                     &exchanges,

@@ -19,6 +19,10 @@
 
   onMount(() => {
     void ensureRecording()
+    recording.places += 1
+    return () => {
+      recording.places -= 1
+    }
   })
 
   const digits = $derived(app.settings?.digits ?? 'western')
@@ -46,11 +50,12 @@
   }
 
   /** The backend's word on where the recording stands, after something this window asked for. */
-  const refresh = async () => takeCaptureStatus(await api.captureStatus(), true)
+  const refresh = async () => takeCaptureStatus(await api.captureStatus())
 
   const begin = () =>
     act(async () => {
-      refused = await api.captureStart(t('recording.windowTitle'))
+      // The window's title, and the text of its own Stop item.
+      refused = await api.captureStart(t('recording.windowTitle'), t('recording.stop'))
       if (refused) return
       armed = false
       saved = false
@@ -93,9 +98,21 @@
     return () => clearInterval(id)
   })
 
-  // A recording stopped earlier (the page was left and come back to) still needs its review.
+  // A recording stopped elsewhere (from its own window, or before this page was opened) still
+  // needs its review.
   $effect(() => {
     if (phase === 'stopped' && !preview && !busy && !error) void rebuild()
+  })
+
+  // The review is what the user has to look at next, wherever on the page they were.
+  let section: HTMLElement | undefined = $state()
+  let broughtUp = false
+  $effect(() => {
+    if (phase !== 'stopped') broughtUp = false
+    else if (preview && !broughtUp) {
+      broughtUp = true
+      section?.scrollIntoView?.({ block: 'start' })
+    }
   })
 
   /** Whole kilobytes or megabytes: enough to know whether the file is small or large. */
@@ -108,7 +125,7 @@
   const count = (n: number) => formatNumber(n, { digits })
 </script>
 
-<section class="rec" aria-labelledby="recording-title" data-testid="router-recording">
+<section class="rec" aria-labelledby="recording-title" data-testid="router-recording" bind:this={section}>
   <h3 id="recording-title">
     {t('recording.title')}
     <InfoTip label={t('metrics.whatIs', { name: t('recording.title') })} text={t('recording.help')} />
@@ -116,7 +133,6 @@
 
   {#if phase === 'idle'}
     <p class="k">{t('recording.body')}</p>
-    {#if recording.closedByHand}<p class="k" role="status">{t('recording.closed')}</p>{/if}
     {#if saved && routerProbe.view?.support === 'unknown'}
       <!-- The form is the New router one, so it is offered only for a router the app can't work
            with yet. -->
@@ -147,7 +163,7 @@
       {#if refused}<p class="err" role="alert">{t(`recording.refused.${refused}`)}</p>{/if}
     {:else}
       <div class="row">
-        <button type="button" class:primary={!saved} onclick={() => ((armed = true), (recording.closedByHand = false))}>
+        <button type="button" class:primary={!saved} onclick={() => (armed = true)}>
           <CircleDot size={16} aria-hidden="true" />{t('recording.start')}
         </button>
       </div>
