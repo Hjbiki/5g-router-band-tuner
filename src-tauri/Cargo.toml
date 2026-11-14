@@ -43,6 +43,11 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # CSV export: the Windows list separator, so Excel opens the file in columns.
 windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
 
+[target.'cfg(windows)'.dev-dependencies]
+# examples/capture_spike.rs only: the versions Tauri itself resolves to.
+webview2-com = "0.38"
+windows-core = "0.61"
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
