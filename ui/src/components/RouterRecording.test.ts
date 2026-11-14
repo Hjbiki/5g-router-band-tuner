@@ -241,6 +241,26 @@ describe('RouterRecording', () => {
     expect(app.tab).toBe('dashboard')
   })
 
+  it('asks for the cleaned file once when two places show the recording', async () => {
+    // The unsupported-router notice and About can be on screen together. Cleaning a large
+    // recording takes seconds: one request, shared.
+    let answer: (p: CapturePreview) => void = () => {}
+    vi.mocked(api.capturePreview).mockReturnValue(new Promise<CapturePreview>((ok) => (answer = ok)))
+    vi.mocked(api.captureStatus).mockResolvedValue(running)
+    render(RouterRecording)
+    render(RouterRecording)
+    await waitFor(() => expect(recording.places).toBe(2))
+    await Promise.resolve()
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    emit(stopped)
+    await waitFor(() => expect(api.capturePreview).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 20))
+    expect(api.capturePreview).toHaveBeenCalledTimes(1)
+    answer(preview)
+    await waitFor(() => expect(screen.getAllByRole('textbox')).toHaveLength(2))
+    expect(api.capturePreview).toHaveBeenCalledTimes(1)
+  })
+
   it('opens About when a recording ends while no page is showing it', async () => {
     takeCaptureStatus(running)
     expect(recording.places).toBe(0)

@@ -12,7 +12,7 @@
   import { t } from '../lib/i18n'
   import { errorText } from '../lib/errors'
   import { formatNumber } from '../lib/format'
-  import { ensureRecording, recording, takeCaptureStatus } from '../lib/recording.svelte'
+  import { ensureRecording, loadPreview, recording, takeCaptureStatus } from '../lib/recording.svelte'
   import { routerProbe } from '../lib/routerProbe.svelte'
   import type { CaptureRefusal } from '../lib/bindings/CaptureRefusal'
   import InfoTip from './ui/InfoTip.svelte'
@@ -101,7 +101,11 @@
   // A recording stopped elsewhere (from its own window, or before this page was opened) still
   // needs its review.
   $effect(() => {
-    if (phase === 'stopped' && !preview && !busy && !error) void rebuild()
+    if (phase !== 'stopped' || preview || busy || error) return
+    void act(async () => {
+      includeCode = false
+      recording.preview = await loadPreview()
+    })
   })
 
   // The review is what the user has to look at next, wherever on the page they were.

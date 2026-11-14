@@ -28,6 +28,20 @@ export function takeCaptureStatus(next: CaptureStatus): void {
   recording.status = next
 }
 
+let loading: Promise<CapturePreview> | null = null
+
+/**
+ * The cleaned file of a recording that is waiting for its review, without the router's scripts.
+ * Every place that shows the recording asks as soon as it stops, and cleaning a large one takes
+ * seconds: they share one request.
+ */
+export function loadPreview(): Promise<CapturePreview> {
+  loading ??= api.capturePreview(false).finally(() => {
+    loading = null
+  })
+  return loading
+}
+
 let started: Promise<void> | null = null
 
 export function ensureRecording(): Promise<void> {
@@ -43,6 +57,7 @@ export function ensureRecording(): Promise<void> {
 /** For tests. */
 export function resetRecording(): void {
   started = null
+  loading = null
   recording.status = IDLE
   recording.preview = null
   recording.places = 0
