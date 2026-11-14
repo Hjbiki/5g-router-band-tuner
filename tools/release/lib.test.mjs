@@ -153,7 +153,8 @@ test("the fixed name is safe to put in a link as it is", () => {
 });
 
 test("both READMEs link their Download button to the file every release uploads", () => {
-  for (const name of ["README.md", "README.ar.md"]) {
+  // README.md is the Arabic one, the page GitHub shows first; README.en.md is the English one.
+  for (const name of ["README.md", "README.en.md"]) {
     const readme = readFileSync(new URL(`../../${name}`, import.meta.url), "utf8");
     assert.ok(
       readme.includes(`https://github.com/Hjbiki/5g-router-band-tuner/releases/latest/download/${STABLE_SETUP_NAME}`),

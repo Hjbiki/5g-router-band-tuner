@@ -19,6 +19,6 @@ It runs the real UI in Playwright's own headless Chromium, with the Tauri backen
 
 ## What each README uses
 
-`README.md` uses `docs/media/en` and `README.ar.md` uses `docs/media/ar`. A future language's README reuses `docs/media/en`.
+`README.md` is the Arabic page, the one GitHub shows first, and uses `docs/media/ar`. `README.en.md` is the English page and uses `docs/media/en`. A future language's README reuses `docs/media/en`.
 
 GIFs stay under 5 MB (the script fails above that) and last 5 to 10 seconds.
