@@ -4,6 +4,14 @@ All notable changes to 5G Router Band Tuner. Versions follow [Semantic Versionin
 
 > **Going back to an older version:** a version without APN switching (0.1.0 and earlier) ignores an open APN change in `pending-apn-change.json`, and one without Refresh IP ignores mobile data left off in `pending-data-switch.json`. Let a change finish, or undo it, and make sure mobile data is on before you install an older version.
 
+## [1.1.0] - 2026-11-14
+
+### Added
+
+- A portable version: one file that you just run, with no install. It is on every release and linked from the README.
+- The first screen now starts with the language choice, with a flag on each language.
+- The installer is now in Arabic as well as English, and asks which language you want when it starts.
+
 ## [1.0.0] - 2026-11-14
 
 First public release. A Windows app that shows your Huawei router's 4G and 5G signal live and helps you find better bands. If a band change loses the internet, your previous bands come back by themselves. Tested on the Huawei H122-373 (firmware 11.0.2.21).
