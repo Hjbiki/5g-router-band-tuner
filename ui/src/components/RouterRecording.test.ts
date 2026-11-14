@@ -19,6 +19,7 @@ vi.mock('../lib/backend', () => ({
 import { api, onCaptureStatus } from '../lib/backend'
 import { setLanguage, t } from '../lib/i18n'
 import { resetRecording } from '../lib/recording.svelte'
+import { resetRouterProbe, routerProbe } from '../lib/routerProbe.svelte'
 import RouterRecording from './RouterRecording.svelte'
 import type { CapturePreview } from '../lib/bindings/CapturePreview'
 import type { CaptureStatus } from '../lib/bindings/CaptureStatus'
@@ -58,6 +59,7 @@ async function begin() {
 describe('RouterRecording', () => {
   beforeEach(() => {
     resetRecording()
+    resetRouterProbe()
     setLanguage('en')
     vi.mocked(onCaptureStatus).mockImplementation(async (cb) => {
       emit = cb
@@ -159,7 +161,8 @@ describe('RouterRecording', () => {
     await waitFor(() => expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('{"with":"code"}'))
   })
 
-  it('saves, forgets the recording, and offers the issue form', async () => {
+  it('saves, forgets the recording, and offers the New router form for a router the app does not support', async () => {
+    routerProbe.view = { support: 'unknown', vendor: 'ZTE', model: null, hardware: null, firmware: null }
     await mounted(running)
     vi.mocked(api.captureStatus).mockResolvedValue(stopped)
     await fireEvent.click(button('recording.stop'))
@@ -170,6 +173,17 @@ describe('RouterRecording', () => {
     await waitFor(() => expect(screen.queryByRole('textbox')).toBeNull())
     await fireEvent.click(button('unsupported.openIssue'))
     expect(api.openRouterIssue).toHaveBeenCalled()
+  })
+
+  it('only says it is saved on a router the app supports: the form is for new routers', async () => {
+    await mounted(running)
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    await fireEvent.click(button('recording.stop'))
+    await screen.findByRole('textbox')
+    vi.mocked(api.captureStatus).mockResolvedValue(idle)
+    await fireEvent.click(button('recording.save'))
+    await waitFor(() => expect(screen.getAllByText(t('recording.saved')).length).toBeGreaterThan(0))
+    expect(noButton('unsupported.openIssue')).toBeNull()
   })
 
   it('keeps the review open when the save dialog is closed', async () => {

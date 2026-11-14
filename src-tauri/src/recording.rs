@@ -56,6 +56,11 @@ impl CaptureState {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Nothing is open, and nothing is waiting to be saved or thrown away.
+    pub fn is_idle(&self) -> bool {
+        matches!(*self.lock(), Flow::Idle)
+    }
+
     fn status(&self) -> CaptureStatus {
         match &*self.lock() {
             Flow::Idle => CaptureStatus {
@@ -157,6 +162,23 @@ pub fn refusal(
         SessionView::LoggedIn | SessionView::Connecting | SessionView::Reconnecting { .. }
     );
     talking.then_some(CaptureRefusal::LoggedIn)
+}
+
+/// Whether a recording is open in this app, or one is waiting for its review.
+pub fn is_open(app: &AppHandle) -> bool {
+    app.try_state::<CaptureState>()
+        .is_some_and(|cap| !cap.is_idle())
+}
+
+/// The other half of "the app isn't talking to the router while its page is recorded": the check
+/// at the start of a recording is no use if the app may log in a minute later. Used by Connect.
+pub fn refuse_while_open(app: &AppHandle) -> Result<(), CmdError> {
+    if is_open(app) {
+        return Err(CmdError::Message(
+            "A recording of the router's page is open. Stop or discard it first.".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The start of `text`, at most `max` bytes, never cut inside a character.
@@ -447,5 +469,21 @@ mod tests {
             }
         );
         assert!(matches!(*cap.lock(), Flow::Idle));
+        assert!(cap.is_idle());
+    }
+
+    #[test]
+    fn a_recording_waiting_for_its_review_still_counts_as_open() {
+        // Until it is saved or thrown away the app stays away from the router: Connect asks this.
+        let cap = CaptureState::default();
+        *cap.lock() = Flow::Stopped(Stopped {
+            exchanges: Arc::new(Vec::new()),
+            limit: None,
+            built: None,
+        });
+        assert!(!cap.is_idle());
+        assert_eq!(cap.status().phase, CapturePhase::Stopped);
+        *cap.lock() = Flow::Idle;
+        assert!(cap.is_idle());
     }
 }

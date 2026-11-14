@@ -44,6 +44,10 @@ fn target(app: &AppHandle) -> Option<String> {
     if driver == "mock" {
         return None;
     }
+    // While the router's own page is being recorded, the app asks the router for nothing.
+    if crate::recording::is_open(app) {
+        return None;
+    }
     let snap = state.snapshot();
     let logged_in_to_known = snap.session == SessionView::LoggedIn
         && snap

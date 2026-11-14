@@ -378,6 +378,11 @@ impl AppState {
     /// Without credentials the session stays `NotConfigured`. Only the router recorded at the
     /// last verified login gets a login proof this way; anything else asks the user first.
     pub async fn auto_connect(&self) {
+        // Not while the router's own page is being recorded (a settings change restarts the
+        // actor and lands here): the app stays away from the router until that is over.
+        if crate::recording::is_open(&self.app) {
+            return;
+        }
         if let Ok(Some(creds)) = self.credentials().await {
             let _ = self.send(Command::ConnectAutomatic(creds)).await;
         }
@@ -556,6 +561,7 @@ async fn blocking<T: Send + 'static>(
 
 #[tauri::command]
 pub async fn connect(state: State<'_, AppState>) -> CmdResult<()> {
+    crate::recording::refuse_while_open(&state.app)?;
     let Some(creds) = state.credentials().await? else {
         return Err("no saved password".to_string().into());
     };
@@ -565,6 +571,7 @@ pub async fn connect(state: State<'_, AppState>) -> CmdResult<()> {
 /// The user read the "is this your router?" question and said yes.
 #[tauri::command]
 pub async fn connect_trusting(state: State<'_, AppState>) -> CmdResult<()> {
+    crate::recording::refuse_while_open(&state.app)?;
     let Some(creds) = state.credentials().await? else {
         return Err("no saved password".to_string().into());
     };

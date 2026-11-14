@@ -13,6 +13,7 @@
   import { errorText } from '../lib/errors'
   import { formatNumber } from '../lib/format'
   import { ensureRecording, recording, takeCaptureStatus } from '../lib/recording.svelte'
+  import { routerProbe } from '../lib/routerProbe.svelte'
   import type { CaptureRefusal } from '../lib/bindings/CaptureRefusal'
   import InfoTip from './ui/InfoTip.svelte'
 
@@ -116,13 +117,17 @@
   {#if phase === 'idle'}
     <p class="k">{t('recording.body')}</p>
     {#if recording.closedByHand}<p class="k" role="status">{t('recording.closed')}</p>{/if}
-    {#if saved}
+    {#if saved && routerProbe.view?.support === 'unknown'}
+      <!-- The form is the New router one, so it is offered only for a router the app can't work
+           with yet. -->
       <p role="status">{t('recording.savedNext')}</p>
       <div class="row">
         <button type="button" class="primary" onclick={openIssue}>
           <ExternalLink size={16} aria-hidden="true" />{t('unsupported.openIssue')}
         </button>
       </div>
+    {:else if saved}
+      <p role="status">{t('recording.saved')}</p>
     {/if}
     {#if armed}
       <ul>

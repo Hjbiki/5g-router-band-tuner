@@ -11,9 +11,10 @@
 //!   cargo rustc -p router-band-tuner --example capture_harness -- \
 //!     -C link-arg=/MANIFEST:EMBED \
 //!     -C link-arg=/MANIFESTINPUT:<full path to src-tauri\examples\common-controls.manifest>
-//!   target\debug\examples\capture_harness.exe [show]
+//!   target\debug\examples\capture_harness.exe [show] [close]
 //!
-//! Run it from `src-tauri`. Without `show` the window stays hidden.
+//! Run it from `src-tauri`. Without `show` the window stays hidden. With `close` the recording
+//! is ended the way a person closing the window with X ends it.
 //!
 //! It prints one `CHECK` line per check and ends with `HARNESS PASSED` or `HARNESS FAILED`.
 
@@ -26,6 +27,12 @@ use std::time::Duration;
 use router_band_tuner_lib::capture_window;
 use router_core::capture::{self, BuildOptions};
 use tauri::Url;
+
+/// The open recording, where the window's "destroyed" event can take it (the `close` run).
+static OPEN: Mutex<Option<capture_window::Recording>> = Mutex::new(None);
+/// What that event got out of it.
+type Finished = (Vec<capture::Exchange>, Option<capture::Limit>);
+static CLOSED: Mutex<Option<mpsc::Sender<Finished>>> = Mutex::new(None);
 
 /// Set only if the app command's body runs: a router's page must never get this far.
 static SECRET_RAN: AtomicBool = AtomicBool::new(false);
@@ -206,6 +213,9 @@ fn serve(mock: &Mock, mut stream: TcpStream) {
 
 fn main() {
     let show = std::env::args().any(|a| a == "show");
+    // `close`: end the recording the way a person closing the window with X does. The window's
+    // own "destroyed" event then finishes it, on the main thread, as the app does.
+    let by_hand = std::env::args().any(|a| a == "close");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a local port");
     let port = listener.local_addr().unwrap().port();
     let (done_tx, done_rx) = mpsc::channel::<String>();
@@ -235,6 +245,17 @@ fn main() {
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![harness_secret])
+        .on_window_event(|window, event| {
+            // What the app's `recording::window_closed` does, from the same place.
+            if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == capture_window::LABEL {
+                if let Some(recording) = OPEN.lock().unwrap().take() {
+                    let finished = recording.finish(tauri::Manager::app_handle(window));
+                    if let Some(tx) = CLOSED.lock().unwrap().take() {
+                        let _ = tx.send(finished);
+                    }
+                }
+            }
+        })
         .setup(move |app| {
             let recording =
                 capture_window::open(app.handle(), &router, &profiles, "capture harness", show)?;
@@ -248,7 +269,25 @@ fn main() {
                 std::thread::sleep(Duration::from_millis(2500));
                 let later: Vec<String> = done_rx.try_iter().collect();
                 let (seen_so_far, _) = recording.progress();
-                let (exchanges, limit) = recording.finish(&handle);
+                let (exchanges, limit) = if by_hand {
+                    let (tx, rx) = mpsc::channel();
+                    *CLOSED.lock().unwrap() = Some(tx);
+                    *OPEN.lock().unwrap() = Some(recording);
+                    if let Some(window) = tauri::Manager::get_webview_window(&handle, capture_window::LABEL) {
+                        let _ = window.close();
+                    }
+                    // A hang in that event would show here as no answer.
+                    rx.recv_timeout(Duration::from_secs(15)).unwrap_or_else(|_| {
+                        println!("CHECK FAIL closing the window by hand ended the recording: no answer in 15 s");
+                        println!("HARNESS FAILED");
+                        std::process::exit(1);
+                    })
+                } else {
+                    recording.finish(&handle)
+                };
+                if by_hand {
+                    println!("CHECK ok   closing the window by hand ended the recording");
+                }
                 let built = capture::build(
                     &exchanges,
                     &BuildOptions {
