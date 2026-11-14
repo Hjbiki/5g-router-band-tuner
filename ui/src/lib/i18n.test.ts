@@ -1,7 +1,7 @@
 import { describe, expect, it, afterEach } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { t, setLanguage, resolveLanguage, LANGUAGES } from './i18n'
+import { t, setLanguage, resolveLanguage, flagsByCode, LANGUAGES } from './i18n'
 
 const dir = resolve(__dirname, 'i18n')
 const langs: Record<string, Record<string, unknown>> = Object.fromEntries(
@@ -41,6 +41,14 @@ describe('i18n', () => {
   it('finds the language files by themselves', () => {
     expect(LANGUAGES.map((l) => l.code)).toEqual(['en', 'ar'])
     expect(LANGUAGES.find((l) => l.code === 'ar')?.dir).toBe('rtl')
+  })
+
+  it('gives each language the flag file named by its code, and none when there is no file', () => {
+    const flags = flagsByCode({ '../../assets/flags/en.svg': '/f/en.svg', '../../assets/flags/pt-BR.svg': '/f/pt-BR.svg' })
+    expect(flags).toEqual({ en: '/f/en.svg', 'pt-BR': '/f/pt-BR.svg' })
+    expect(flags.fr).toBeUndefined()
+    // The two bundled languages have theirs.
+    for (const l of LANGUAGES) expect(l.flag, l.code).toBeTruthy()
   })
 
   it('resolves the system language and falls back to English', () => {

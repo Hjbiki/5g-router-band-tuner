@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte'
   import { app, updateSettings } from '../lib/store.svelte'
-  import { LANGUAGES, resolveLanguage, setLanguage, t } from '../lib/i18n'
+  import { LANGUAGES, messagesUnder, resolveLanguage, setLanguage, t } from '../lib/i18n'
   import { errorText } from '../lib/errors'
   import { formatNumber } from '../lib/format'
   import { routerProbe } from '../lib/routerProbe.svelte'
@@ -38,6 +38,8 @@
 
   const digits = $derived(app.settings?.digits ?? 'western')
   const lang = $derived(resolveLanguage(app.settings?.language))
+  // The word "Language" in each language the app has, whatever language the screen is in.
+  const languageLabel = LANGUAGES.map((l) => messagesUnder('onboarding', l.code).languagePick).join(' · ')
 
   $effect(() => {
     void step
@@ -126,16 +128,22 @@
     </header>
 
     {#if step === 1}
+      <!-- First, and labelled in every language: the screen opens in the language Windows is
+           set to, which the person in front of it may not read. -->
+      <div class="langs" role="group" aria-labelledby="onb-lang">
+        <p id="onb-lang" class="muted">{languageLabel}</p>
+        <div class="lang-buttons">
+          {#each LANGUAGES as l (l.code)}
+            <button type="button" lang={l.code} aria-pressed={lang === l.code} onclick={() => pickLanguage(l.code)}>
+              {#if l.flag}<img src={l.flag} alt="" width="32" height="24" />{/if}
+              <span>{l.name}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
       <h2 id="onb-title" tabindex="-1" bind:this={heading}>{t('onboarding.welcomeTitle')}</h2>
       <p>{t('onboarding.welcomeBody')}</p>
       <p class="muted">{t('onboarding.welcomeLocal')}</p>
-      <div class="langs" role="group" aria-label={t('onboarding.languagePick')}>
-        {#each LANGUAGES as l (l.code)}
-          <button type="button" lang={l.code} aria-pressed={lang === l.code} onclick={() => pickLanguage(l.code)}
-            >{l.name}</button
-          >
-        {/each}
-      </div>
     {:else if step === 2}
       <h2 id="onb-title" tabindex="-1" bind:this={heading}>{t('onboarding.loginTitle')}</h2>
       {#if routerProbe.view?.support === 'unknown'}
@@ -302,8 +310,31 @@
   }
   .langs {
     display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font-size: var(--fs-small);
+  }
+  .lang-buttons {
+    display: flex;
     flex-wrap: wrap;
     gap: 8px;
+  }
+  .lang-buttons button {
+    flex: 1 1 160px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    min-block-size: 48px;
+    padding-inline: 16px;
+    font-size: 16px;
+  }
+  /* A flag is shown whole and unchanged, in both directions. */
+  .lang-buttons img {
+    inline-size: 32px;
+    block-size: 24px;
+    border-radius: 3px;
+    box-shadow: 0 0 0 1px var(--border);
   }
   .langs [aria-pressed='true'] {
     border-color: var(--text);

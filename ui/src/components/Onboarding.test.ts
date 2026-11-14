@@ -165,6 +165,26 @@ describe('Onboarding', () => {
     expect(vi.mocked(api.saveSettings).mock.calls[0][0].onboardingDone).toBe(true)
   })
 
+  it('puts the language choice first on the first screen, labelled in every language', () => {
+    render(Onboarding)
+    // Someone who can't read the language Windows is set to must still find the choice.
+    const group = screen.getByRole('group', { name: 'Language · اللغة' })
+    const welcome = screen.getByRole('heading', { name: t('onboarding.welcomeTitle') })
+    expect(group.compareDocumentPosition(welcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText('Language · اللغة')).toBeTruthy()
+  })
+
+  it('shows a flag on each language without changing its name', () => {
+    render(Onboarding)
+    for (const name of ['English', 'العربية']) {
+      // An exact name: the flag is decoration, so it must add nothing to what is read out.
+      const img = screen.getByRole('button', { name }).querySelector('img')
+      expect(img, name).not.toBeNull()
+      expect(img?.getAttribute('alt'), name).toBe('')
+      expect(img?.getAttribute('src'), name).toBeTruthy()
+    }
+  })
+
   it('switches to Arabic from the first screen and saves the choice', async () => {
     render(Onboarding)
     await fireEvent.click(screen.getByRole('button', { name: 'العربية' }))

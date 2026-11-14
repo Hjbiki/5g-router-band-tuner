@@ -20,13 +20,35 @@ for (const [path, dict] of Object.entries(files)) {
   dictionaries[path.slice(2, -'.json'.length)] = dict
 }
 
-export type LanguageInfo = { code: Lang; name: string; dir: 'ltr' | 'rtl' }
+// A flag is `<language code>.svg` in ui/src/assets/flags (see the README there). They are
+// third-party pictures, so they are only ever shown through an <img>.
+const flagFiles = import.meta.glob('../../assets/flags/*.svg', {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>
+
+/** The flag picture of each language code that has a file. */
+export function flagsByCode(files: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [path, url] of Object.entries(files)) {
+    const code = path.split('/').pop()?.slice(0, -'.svg'.length)
+    if (code) out[code] = url
+  }
+  return out
+}
+const FLAGS = flagsByCode(flagFiles)
+
+/** `flag` is a picture's address, missing for a language that has no flag file. */
+export type LanguageInfo = { code: Lang; name: string; dir: 'ltr' | 'rtl'; flag?: string }
 
 /** The available languages, English first, then by code. */
 export const LANGUAGES: LanguageInfo[] = Object.entries(dictionaries)
   .map(([code, d]) => {
     const meta = (d.meta ?? {}) as { name?: string; dir?: string }
-    return { code, name: meta.name ?? code, dir: meta.dir === 'rtl' ? 'rtl' : 'ltr' } as LanguageInfo
+    const info: LanguageInfo = { code, name: meta.name ?? code, dir: meta.dir === 'rtl' ? 'rtl' : 'ltr' }
+    if (FLAGS[code]) info.flag = FLAGS[code]
+    return info
   })
   .sort((a, b) => (a.code === 'en' ? -1 : b.code === 'en' ? 1 : a.code.localeCompare(b.code)))
 
