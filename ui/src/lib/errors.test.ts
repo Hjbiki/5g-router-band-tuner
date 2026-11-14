@@ -20,6 +20,12 @@ describe('errorText', () => {
       t('reboot.expired'),
     )
   })
+  it('maps the refusal to connect while a router recording is open or waiting', () => {
+    // The backend's own words, from `recording::refuse_while_open`.
+    const said = "A recording of the router's page is open. Stop or discard it first."
+    expect(errorText(said)).toBe(t('errors.recordingOpen'))
+    expect(t('errors.recordingOpen')).not.toContain(said)
+  })
   it('maps the history refusals', () => {
     expect(errorText('wait for the auto-scan or speed test to finish')).toBe(t('errors.historyBusy'))
     expect(errorText('history is not available')).toBe(t('errors.historyUnavailable'))

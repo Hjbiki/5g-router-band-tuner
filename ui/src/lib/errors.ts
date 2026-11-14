@@ -21,6 +21,7 @@ const KNOWN: Record<string, MessageKey> = {
   'not connected to the router': 'bands.reason.notReady',
   'router service is not running': 'settings.error.serviceDown',
   'router service stopped': 'settings.error.serviceDown',
+  "A recording of the router's page is open. Stop or discard it first.": 'errors.recordingOpen',
   'history is not available': 'errors.historyUnavailable',
   'history was made by a newer version of the app': 'errors.historyNewer',
   'wait for the auto-scan or speed test to finish': 'errors.historyBusy',

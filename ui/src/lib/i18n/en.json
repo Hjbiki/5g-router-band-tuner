@@ -1813,6 +1813,7 @@
     "onboarding": "This router isn't supported yet, so you can leave the password empty. You'll see how to report it after this guide."
   },
   "errors": {
+    "recordingOpen": "Finish the router recording first: save or discard it.",
     "historyUnavailable": "History isn't available on this PC right now.",
     "historyBusy": "Wait for the auto-scan or speed test to finish, then try again.",
     "historyNewer": "This history was saved by a newer version of the app, so it can be shown but not changed.",
