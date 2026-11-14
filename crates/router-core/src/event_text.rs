@@ -1643,7 +1643,7 @@ mod tests {
         let tried = describe(&rec(
             1,
             kinds::IP_REFRESH_TRY,
-            json!({"n": 1, "from": "10.134", "to": "10.118", "off_s": 0, "method": "networkSearch"}),
+            json!({"n": 1, "from": "10.45", "to": "10.67", "off_s": 0, "method": "networkSearch"}),
         ));
         assert_eq!(tried.key, "events.kind.ipRefreshTrySearch");
         let search = |detail: Value| describe(&rec(1, kinds::IP_REFRESH_SEARCH, detail));
