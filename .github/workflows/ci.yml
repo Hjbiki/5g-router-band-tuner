@@ -1,23 +1,43 @@
 name: CI
 on:
   push:
+    # Branches only: a version tag runs these same checks through the Release workflow.
+    branches: ['**']
   pull_request:
+  workflow_call:
 # CI only reads the repo and publishes nothing.
 permissions:
   contents: read
 jobs:
   check:
     runs-on: windows-latest
+    env:
+      # A smaller build folder, so it fits in the cache and comes back quickly.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      # The commit-message check needs the history and tags.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
+      # `stable` moves, so the cache is kept per Rust version: an older compiler's files are no use.
+      - id: rust
+        shell: bash
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+      # The downloaded libraries and their compiled form: most of a run's time without this.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: check-${{ runner.os }}-rust-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            check-${{ runner.os }}-rust-${{ steps.rust.outputs.version }}-
       - run: pnpm --dir ui install --frozen-lockfile
       - run: pnpm --dir ui check
       - run: pnpm --dir ui test

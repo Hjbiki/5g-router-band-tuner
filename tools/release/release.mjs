@@ -10,6 +10,10 @@
 // 5. Commits "chore(release): vX.Y.Z", tags vX.Y.Z, shows what would be published, then asks
 //    before pushing and before creating a GitHub Release with the installers attached.
 //    Answer no and `release.bat --publish` picks up from there.
+//
+// With --github-build, steps 4 and 5 shrink to: refresh Cargo.lock, commit, tag, and print the
+// one command that uploads the branch and the tag. Nothing is tested, built or pushed on this
+// PC: the Release workflow on GitHub runs the checks, builds the installers and publishes.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -25,11 +29,13 @@ import {
   changelogSection,
   decideBump,
   fillReleaseNotes,
+  installersFor,
   jsonVersion,
   KNOWN,
   needsShell,
   parseCommit,
   prependChangelog,
+  pushCommand,
   releaseSection,
   setCargoWorkspaceVersion,
   setJsonVersion,
@@ -63,6 +69,7 @@ const CHECKS = [
 ];
 
 const HELP = `Usage: release.bat [--dry-run] [--from <ref>] [--bump <kind>] [--notes-file <path>] [--prerelease]
+       release.bat --github-build [--from <ref>] [--bump <kind>] [--notes-file <path>]
        release.bat --publish [--prerelease]
 
   --dry-run            show what would be released and stop; nothing is changed
@@ -74,6 +81,8 @@ const HELP = `Usage: release.bat [--dry-run] [--from <ref>] [--bump <kind>] [--n
                        the entry becomes the release date.
   --prerelease         mark the GitHub Release as a pre-release
   --publish            push and publish the release already tagged at HEAD
+  --github-build       only bump, commit and tag here, then print the command that uploads
+                       them; GitHub runs the checks, builds the installers and publishes
 
 Commit messages must follow Conventional Commits. A "Changelog: <text>" footer
 replaces the changelog line taken from the subject.`;
@@ -99,7 +108,15 @@ function git(...args) {
 }
 
 function parseArgs(argv) {
-  const a = { dryRun: false, from: null, bump: null, notesFile: null, prerelease: false, publish: false };
+  const a = {
+    dryRun: false,
+    from: null,
+    bump: null,
+    notesFile: null,
+    prerelease: false,
+    publish: false,
+    githubBuild: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--dry-run") a.dryRun = true;
     else if (argv[i] === "--from") a.from = argv[++i] ?? null;
@@ -107,6 +124,7 @@ function parseArgs(argv) {
     else if (argv[i] === "--notes-file") a.notesFile = argv[++i] ?? null;
     else if (argv[i] === "--prerelease") a.prerelease = true;
     else if (argv[i] === "--publish") a.publish = true;
+    else if (argv[i] === "--github-build") a.githubBuild = true;
     else if (argv[i] === "--help" || argv[i] === "-h") {
       console.log(HELP);
       process.exit(0);
@@ -117,6 +135,10 @@ function parseArgs(argv) {
     throw new Abort("--bump needs major, minor or patch");
   }
   if (a.notesFile === null && argv.includes("--notes-file")) throw new Abort("--notes-file needs a path");
+  // The Release workflow only takes vX.Y.Z tags and publishes them as full releases.
+  if (a.githubBuild && (a.prerelease || a.publish)) {
+    throw new Abort("--github-build can't be combined with --prerelease or --publish");
+  }
   return a;
 }
 
@@ -156,9 +178,7 @@ function installers(version) {
   for (const dir of ["target/release/bundle/nsis", "target/release/bundle/msi"]) {
     const abs = join(ROOT, dir);
     if (!existsSync(abs)) continue;
-    for (const f of readdirSync(abs)) {
-      if (f.includes(version) && /\.(exe|msi)$/i.test(f)) found.push(join(abs, f));
-    }
+    for (const f of installersFor(readdirSync(abs), version)) found.push(join(abs, f));
   }
   return found;
 }
@@ -282,7 +302,10 @@ async function main() {
   const rl = createInterface({ input: stdin, output: stdout });
   const ask = asker(rl);
   try {
-    if (!(await ask(`\nRelease v${next}? This runs the full test suite and a release build.`))) {
+    const what = args.githubBuild
+      ? "This only commits and tags here; GitHub tests, builds and publishes after you upload."
+      : "This runs the full test suite and a release build.";
+    if (!(await ask(`\nRelease v${next}? ${what}`))) {
       console.log("Cancelled; nothing was changed.");
       return 1;
     }
@@ -303,9 +326,16 @@ async function main() {
       if (!hadChangelog) rmSync(clPath, { force: true });
     };
 
-    for (const [cmd, a] of CHECKS) {
+    // With --github-build only the lock file is brought in step here: a tag whose Cargo.lock
+    // lags the new version fails every --locked command on GitHub.
+    const lockInStep = [
+      CHECKS[0],
+      ["cargo", ["metadata", "--locked", "--offline", "--format-version", "1", "--no-deps"]],
+    ];
+    for (const [cmd, a] of args.githubBuild ? lockInStep : CHECKS) {
       console.log(`\n> ${cmd} ${a.join(" ")}`);
-      if (!run(cmd, a).ok) {
+      // `cargo metadata` prints the whole workspace as JSON: only its verdict matters here.
+      if (!run(cmd, a, { capture: a[0] === "metadata" }).ok) {
         restore();
         throw new Abort(`"${cmd} ${a.join(" ")}" failed; the version and changelog changes were undone`);
       }
@@ -321,6 +351,11 @@ async function main() {
     git("tag", "-a", "--cleanup=verbatim", `v${next}`, "-m", `v${next}\n\n${section}`);
     console.log(`\nCommitted and tagged v${next}.`);
 
+    if (args.githubBuild) {
+      console.log("Nothing was pushed. To upload it, and have GitHub build and publish the release:");
+      console.log(`\n  ${pushCommand(next)}\n`);
+      return 0;
+    }
     await publish(ask, next, section, args.prerelease);
     console.log(`\nDone: v${next}.`);
     return 0;

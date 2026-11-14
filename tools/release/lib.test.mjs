@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   STABLE_SETUP_NAME,
+  installersFor,
+  publishedNotes,
+  pushCommand,
   stableSetupSource,
+  tagMatchesVersion,
   bumpVersion,
   cargoWorkspaceVersion,
   changelogSection,
@@ -161,4 +165,68 @@ test("both READMEs link their Download button to the file every release uploads"
       `${name} has no link to the newest ${STABLE_SETUP_NAME}`,
     );
   }
+});
+
+test("a release tag must name the version in the manifests", () => {
+  assert.equal(tagMatchesVersion("v1.0.0", "1.0.0"), true);
+  assert.equal(tagMatchesVersion("v1.0.1", "1.0.0"), false);
+  assert.equal(tagMatchesVersion("1.0.0", "1.0.0"), false);
+  assert.equal(tagMatchesVersion("v1.0.0-rc.1", "1.0.0"), false);
+  assert.equal(tagMatchesVersion("", "1.0.0"), false);
+});
+
+test("the installers of a version are the files that carry exactly its number", () => {
+  const names = [
+    "5G Router Band Tuner_1.0.0_x64-setup.exe",
+    "5G Router Band Tuner_1.0.0_x64_en-US.msi",
+    "5G Router Band Tuner_11.0.0_x64-setup.exe",
+    "5G Router Band Tuner_1.0.0-rc1_x64-setup.exe",
+    "5G-Router-Band-Tuner-Setup.exe",
+    "notes_1.0.0_.txt",
+  ];
+  assert.deepEqual(installersFor(names, "1.0.0"), [names[0], names[1]]);
+  assert.deepEqual(installersFor([], "1.0.0"), []);
+});
+
+test("the published notes are the changelog entry followed by each file's SHA-256", () => {
+  const ab = "ab".repeat(32);
+  const cd = "cd".repeat(32);
+  const notes = publishedNotes("## [1.0.0] - 2026-11-20\n\n### Added\n\n- A thing.\n", [
+    { name: "5G-Router-Band-Tuner-Setup.exe", sha256: ab },
+    { name: "5G Router Band Tuner_1.0.0_x64_en-US.msi", sha256: cd },
+  ]);
+  assert.ok(notes.startsWith("## [1.0.0] - 2026-11-20\n\n### Added\n\n- A thing.\n\n### SHA-256\n\n"));
+  assert.ok(notes.includes(`- \`5G-Router-Band-Tuner-Setup.exe\`: \`${ab}\`\n`));
+  assert.ok(notes.endsWith(`- \`5G Router Band Tuner_1.0.0_x64_en-US.msi\`: \`${cd}\`\n`));
+});
+
+const workflow = (name) => readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8");
+
+test("every action a workflow uses is pinned to one exact commit", () => {
+  for (const name of ["ci.yml", "release.yml"]) {
+    const used = [...workflow(name).matchAll(/^\s*(?:- )?uses:\s*(\S+)/gm)].map((m) => m[1]);
+    assert.ok(used.length > 0, `${name} uses no action`);
+    for (const ref of used) {
+      // A workflow in this repo is called by its path; anything else needs a full commit hash.
+      if (ref.startsWith("./")) continue;
+      assert.match(ref, /^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/, `${name}: ${ref} isn't pinned to a commit`);
+    }
+  }
+});
+
+test("only the publishing job may write to the repo, and only on a version tag", () => {
+  assert.ok(!workflow("ci.yml").includes("contents: write"), "the checks must stay read-only");
+  const release = workflow("release.yml");
+  assert.equal(release.match(/contents: write/g)?.length, 1);
+  const publish = release.slice(release.indexOf("\n  publish:"));
+  assert.ok(publish.includes("contents: write"), "the write permission belongs to the publish job");
+  assert.ok(publish.includes("if: github.ref_type == 'tag'"), "publishing is for tag pushes only");
+  assert.ok(publish.includes("needs: [checks, build]"), "publishing waits for the checks and the build");
+  // Version tags only: a branch push or any other tag never starts a release.
+  assert.match(release, /tags:\s*\['v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+'\]/);
+});
+
+test("the upload command names the branch and the one tag, never every tag", () => {
+  assert.equal(pushCommand("1.0.0"), "git push origin main v1.0.0");
+  assert.ok(!pushCommand("1.0.0").includes("--tags"));
 });

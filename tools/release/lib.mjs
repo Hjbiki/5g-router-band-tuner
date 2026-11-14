@@ -167,3 +167,27 @@ export function stableSetupSource(files) {
     : "no NSIS setup .exe among the installers";
   return { source: null, problem };
 }
+
+/** Whether a pushed tag is the release tag of the version in the manifests. */
+export function tagMatchesVersion(tag, version) {
+  return tag === `v${version}`;
+}
+
+/**
+ * The installers of `version` among the file names of a bundle folder: the names carry the
+ * number between underscores, so 1.0.0 never picks up 11.0.0 or 1.0.0-rc1.
+ */
+export function installersFor(names, version) {
+  return names.filter((f) => f.includes(`_${version}_`) && /\.(exe|msi)$/i.test(f));
+}
+
+/** What a GitHub Release says: the changelog entry, then each attached file's SHA-256. */
+export function publishedNotes(section, files) {
+  const sums = files.map((f) => `- \`${f.name}\`: \`${f.sha256}\``).join("\n");
+  return `${section.trim()}\n\n### SHA-256\n\n${sums}\n`;
+}
+
+/** The one command that uploads a tagged release: the branch and that tag, never every tag. */
+export function pushCommand(version) {
+  return `git push origin main v${version}`;
+}
