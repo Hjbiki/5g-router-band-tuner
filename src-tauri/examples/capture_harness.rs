@@ -9,8 +9,11 @@
 //!
 //! Build and run (the manifest is what any Tauri window needs on Windows):
 //!   cargo rustc -p router-band-tuner --example capture_harness -- \
-//!     -C link-arg=/MANIFEST:EMBED -C link-arg=/MANIFESTINPUT:<common-controls manifest>
+//!     -C link-arg=/MANIFEST:EMBED \
+//!     -C link-arg=/MANIFESTINPUT:<full path to src-tauri\examples\common-controls.manifest>
 //!   target\debug\examples\capture_harness.exe [show]
+//!
+//! Run it from `src-tauri`. Without `show` the window stays hidden.
 //!
 //! It prints one `CHECK` line per check and ends with `HARNESS PASSED` or `HARNESS FAILED`.
 
