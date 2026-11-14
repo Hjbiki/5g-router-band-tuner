@@ -11,11 +11,13 @@
 //!   cargo rustc -p router-band-tuner --example capture_harness -- \
 //!     -C link-arg=/MANIFEST:EMBED \
 //!     -C link-arg=/MANIFESTINPUT:<full path to src-tauri\examples\common-controls.manifest>
-//!   target\debug\examples\capture_harness.exe [show] [close | stop]
+//!   target\debug\examples\capture_harness.exe [show] [close | stop | quit]
 //!
 //! Run it from `src-tauri`. Without `show` the window stays hidden. With `close` the recording
 //! is ended the way a person closing the window with X ends it, and with `stop` by the window's
-//! own Stop item, pressed the way Windows reports a click on it.
+//! own Stop item, pressed the way Windows reports a click on it. With `quit` the app is told to
+//! exit while the recording is open: the app must hear of that before the window goes, because
+//! that is where it throws the recording away instead of keeping it for a review.
 //!
 //! It prints one `CHECK` line per check and ends with `HARNESS PASSED` or `HARNESS FAILED`.
 
@@ -34,6 +36,11 @@ static OPEN: Mutex<Option<capture_window::Recording>> = Mutex::new(None);
 /// What that event got out of it.
 type Finished = (Vec<capture::Exchange>, Option<capture::Limit>);
 static CLOSED: Mutex<Option<mpsc::Sender<Finished>>> = Mutex::new(None);
+
+/// The `quit` run: the app was told to exit with the recording open.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+/// In that run: the exit was announced while the recording was still open.
+static QUIT_IN_ORDER: AtomicBool = AtomicBool::new(false);
 
 /// What the window's Stop item is told to say.
 const STOP_TEXT: &str = "Stop and review";
@@ -263,6 +270,7 @@ fn main() {
     // the window's own Stop item. Either way the window's "destroyed" event then finishes it, on
     // the main thread, as the app does.
     let by_item = std::env::args().any(|a| a == "stop");
+    let quit = std::env::args().any(|a| a == "quit");
     let by_hand = by_item || std::env::args().any(|a| a == "close");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a local port");
     let port = listener.local_addr().unwrap().port();
@@ -330,6 +338,14 @@ fn main() {
                     .map_or(0, |h| h.0 as isize);
                 // The window's one control of its own, read before anything ends.
                 let item = menu::only_item(hwnd);
+                if quit {
+                    // What the app does with an open recording when it is told to exit is in the
+                    // run loop below. The process ends there.
+                    *OPEN.lock().unwrap() = Some(recording);
+                    QUITTING.store(true, Ordering::SeqCst);
+                    handle.exit(0);
+                    return;
+                }
                 let (exchanges, limit) = if by_hand {
                     let (tx, rx) = mpsc::channel();
                     *CLOSED.lock().unwrap() = Some(tx);
@@ -566,14 +582,33 @@ fn main() {
         })
         .build(context)
         .expect("harness app")
-        .run(|_, event| {
+        .run(|app, event| match event {
             // Closing the recording window leaves the harness with no window, and Tauri would
             // end the process there, before the checks are printed. Only `exit` ends it.
-            if let tauri::RunEvent::ExitRequested {
+            tauri::RunEvent::ExitRequested {
                 api, code: None, ..
-            } = event
+            } => api.prevent_exit(),
+            // What the app's `recording::app_exiting` does, from the same place: the recording
+            // must still be open here, or its window going away was taken for "stop".
+            tauri::RunEvent::ExitRequested { code: Some(_), .. }
+                if QUITTING.load(Ordering::SeqCst) =>
             {
-                api.prevent_exit();
+                if let Some(recording) = OPEN.lock().unwrap().take() {
+                    QUIT_IN_ORDER.store(true, Ordering::SeqCst);
+                    drop(recording.finish(app));
+                }
             }
+            tauri::RunEvent::Exit if QUITTING.load(Ordering::SeqCst) => {
+                let ok = QUIT_IN_ORDER.load(Ordering::SeqCst);
+                println!(
+                    "CHECK {} the app hears of an exit while the recording is still open",
+                    if ok { "ok  " } else { "FAIL" }
+                );
+                println!("{}", if ok { "HARNESS PASSED" } else { "HARNESS FAILED" });
+                if !ok {
+                    std::process::exit(1);
+                }
+            }
+            _ => {}
         });
 }

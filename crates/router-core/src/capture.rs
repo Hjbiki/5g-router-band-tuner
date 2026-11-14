@@ -1444,7 +1444,7 @@ mod tests {
             "<response><rsrp>-95dBm</rsrp><sinr>12dB</sinr><band>3</band><mode>7</mode>\
              <cell_id>123456789</cell_id><pci>140</pci><WifiSsid>Hibi-Home-Net</WifiSsid>\
              <WifiWpapsk>my-wifi-password</WifiWpapsk><Imei>356789012345678</Imei>\
-             <MacAddress1>AA:BB:CC:DD:EE:FF</MacAddress1><WanIPAddress>10.134.22.7</WanIPAddress></response>",
+             <MacAddress1>AA:BB:CC:DD:EE:FF</MacAddress1><WanIPAddress>10.45.22.7</WanIPAddress></response>",
         );
         exchange(
             &mut rec,
@@ -1467,7 +1467,7 @@ mod tests {
             "my-wifi-password",
             "356789012345678",
             "AA:BB:CC:DD:EE:FF",
-            "10.134.22.7",
+            "10.45.22.7",
             "Hibi-iPhone",
             "Anad laptop",
             "your code is 4471",
@@ -1746,7 +1746,7 @@ mod tests {
              <HardwareVersion>WL1H122M</HardwareVersion>\n\
              <SoftwareVersion>{firmware}</SoftwareVersion>\n<WebUIVersion>{web_ui}</WebUIVersion>\n\
              <MacAddress1>A4:B1:C2:D3:E4:F5</MacAddress1>\n<MacAddress2></MacAddress2>\n\
-             <WanIPAddress>10.134.20.7</WanIPAddress>\n<ProductFamily>LTE</ProductFamily>\n\
+             <WanIPAddress>10.45.20.7</WanIPAddress>\n<ProductFamily>LTE</ProductFamily>\n\
              <Classify>cpe</Classify>\n<supportmode>LTE|NR</supportmode>\n<workmode>LTE</workmode>\n\
              <Mccmnc>42004</Mccmnc>\n<uptime>957969</uptime>\n</response>\n"
         )
@@ -1786,7 +1786,7 @@ mod tests {
             "356789012345678",
             "420041234567890",
             "A4:B1",
-            "10.134",
+            "10.45",
         ] {
             assert!(!text.contains(private), "{private}");
         }
@@ -2321,14 +2321,14 @@ mod tests {
             "XHR",
             json!({}),
             "text/xml",
-            "<?xml version=\"1.0\" encoding=\"10.9.8.7\"?><response><wanversion>10.134.22.7</wanversion>\
+            "<?xml version=\"1.0\" encoding=\"10.9.8.7\"?><response><wanversion>10.45.22.7</wanversion>\
              <status>&#49;&#48;&#46;&#49;&#46;&#50;&#46;&#51;</status><signal>aabb-ccdd-eeff</signal>\
              <level>2a00:1:2:3::/64</level><SoftwareVersion>11.0.2.21</SoftwareVersion></response>",
         );
         let (text, v) = built(rec, &opts());
         for gone in [
             "10.9.8.7",
-            "10.134.22.7",
+            "10.45.22.7",
             "&#49;",
             "aabb-ccdd-eeff",
             "2a00:1:2:3",
@@ -2973,7 +2973,11 @@ mod tests {
             "1",
             "http://192.168.8.1/api/x",
             "text/xml",
-            "<response><result>a1b2&amp;c3d4&amp;e5f6</result>             <SoftwareVersion>35678901&#50;345678</SoftwareVersion>             <HardwareVersion>A4:B1:C2&#58;D3:E4:F5</HardwareVersion>             <LTEBand>3567890&#x31;2345679</LTEBand>             <wanversion>10.134&#46;22.7</wanversion><band>3</band></response>",
+            "<response><result>a1b2&amp;c3d4&amp;e5f6</result>\
+             <SoftwareVersion>35678901&#50;345678</SoftwareVersion>\
+             <HardwareVersion>A4:B1:C2&#58;D3:E4:F5</HardwareVersion>\
+             <LTEBand>3567890&#x31;2345679</LTEBand>\
+             <wanversion>10.45&#46;22.7</wanversion><band>3</band></response>",
         );
         let (text, v) = built(rec, &opts());
         for gone in [
@@ -2987,7 +2991,7 @@ mod tests {
             "D3:E4",
             "3567890",
             "2345679",
-            "10.134",
+            "10.45",
             "22.7",
             "&#",
         ] {
@@ -3009,7 +3013,8 @@ mod tests {
             "1",
             "http://192.168.8.1/api/x",
             "text/xml",
-            "<response><status>ab<!-- x -->cd</status><mode><![CDATA[bridge]]></mode>             <state>idle&nbsp;wait</state><result>up<?x y?>down</result><band>3</band></response>",
+            "<response><status>ab<!-- x -->cd</status><mode><![CDATA[bridge]]></mode>\
+             <state>idle&nbsp;wait</state><result>up<?x y?>down</result><band>3</band></response>",
         );
         let (text, v) = built(rec, &opts());
         for gone in [">ab", "cd<", "bridge", "idle", "wait", ">up", "down<"] {
