@@ -7,7 +7,7 @@
 //                     (the changelog entry and each file's SHA-256) beside them
 
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -48,6 +48,9 @@ if (mode === "check-tag") {
   const setup = stableSetupSource(built);
   if (!setup.source) fail(`${setup.problem}: the README's Download button needs exactly one`);
 
+  // The build folder comes back from the workflow's cache, and with it whatever an earlier build
+  // collected: start empty, so only this version's files are uploaded.
+  rmSync(OUT, { recursive: true, force: true });
   mkdirSync(OUT, { recursive: true });
   const files = [];
   const put = (from, name) => {

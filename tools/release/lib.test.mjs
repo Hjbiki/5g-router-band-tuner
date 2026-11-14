@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   STABLE_SETUP_NAME,
   installersFor,
@@ -224,6 +228,50 @@ test("only the publishing job may write to the repo, and only on a version tag",
   assert.ok(publish.includes("needs: [checks, build]"), "publishing waits for the checks and the build");
   // Version tags only: a branch push or any other tag never starts a release.
   assert.match(release, /tags:\s*\['v\[0-9\]\+\.\[0-9\]\+\.\[0-9\]\+'\]/);
+});
+
+test("the upload folder holds only this version's files, whatever an earlier build left there", () => {
+  // The build folder comes back from the workflow's cache, so it can hold an earlier version's
+  // installers and upload folder. None of that may reach the release.
+  const root = mkdtempSync(join(tmpdir(), "rbt-collect-"));
+  try {
+    const put = (path, text = "x") => {
+      mkdirSync(join(root, path, ".."), { recursive: true });
+      writeFileSync(join(root, path), text);
+    };
+    for (const name of ["ci-release.mjs", "lib.mjs"]) {
+      mkdirSync(join(root, "tools/release"), { recursive: true });
+      copyFileSync(fileURLToPath(new URL(name, import.meta.url)), join(root, "tools/release", name));
+    }
+    put("Cargo.toml", '[workspace]\nmembers = []\n\n[workspace.package]\nversion = "1.0.0"\n');
+    put("CHANGELOG.md", "# Changelog\n\n## [1.0.0] - d\n\n- New.\n\n## [0.1.0] - d\n\n- Old.\n");
+    put("target/release/bundle/nsis/5G Router Band Tuner_1.0.0_x64-setup.exe", "new setup");
+    put("target/release/bundle/msi/5G Router Band Tuner_1.0.0_x64_en-US.msi", "new msi");
+    put("target/release/bundle/nsis/5G Router Band Tuner_0.1.0_x64-setup.exe", "old setup");
+    put("target/release-upload/5G Router Band Tuner_0.1.0_x64-setup.exe", "old setup");
+    put("target/release-upload/5G Router Band Tuner_0.1.0_x64_en-US.msi", "old msi");
+    put("target/release-upload/5G-Router-Band-Tuner-Setup.exe", "old setup");
+    put("target/release-upload/notes.md", "old notes");
+
+    const run = spawnSync(process.execPath, [join(root, "tools/release/ci-release.mjs"), "collect"], {
+      encoding: "utf8",
+    });
+    assert.equal(run.status, 0, run.stderr);
+
+    const out = join(root, "target/release-upload");
+    assert.deepEqual(readdirSync(out).sort(), [
+      "5G Router Band Tuner_1.0.0_x64-setup.exe",
+      "5G Router Band Tuner_1.0.0_x64_en-US.msi",
+      STABLE_SETUP_NAME,
+      "notes.md",
+    ]);
+    assert.equal(readFileSync(join(out, STABLE_SETUP_NAME), "utf8"), "new setup");
+    const notes = readFileSync(join(out, "notes.md"), "utf8");
+    assert.ok(notes.startsWith("## [1.0.0] - d\n\n- New.\n\n### SHA-256\n\n"), notes);
+    assert.ok(!notes.includes("0.1.0"), "the notes list an earlier version's file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the upload command names the branch and the one tag, never every tag", () => {
