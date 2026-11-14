@@ -1,0 +1,49 @@
+[package]
+name = "router-band-tuner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.89"
+
+[lib]
+name = "router_band_tuner_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+router-core = { path = "../crates/router-core" }
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-notification = "2"
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "process", "io-util"] }
+async-trait = "0.1"
+ts-rs = "10"
+tauri-plugin-opener = "2"
+sys-locale = "0.3"
+# Speed test: the only network peer besides the router, used only when the user presses Run.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+sha2 = "0.11.1"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+# M2 history: one local SQLite file in the app data folder.
+rusqlite = { version = "0.41", features = ["bundled"] }
+rand = "0.10"
+# CSV export: local and UTC times.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+# CSV export: the Windows list separator, so Excel opens the file in columns.
+windows-sys = { version = "0.61", features = ["Win32_Globalization"] }
+
+[dev-dependencies]
+tempfile = "3"
+wiremock = "0.6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util", "process"] }

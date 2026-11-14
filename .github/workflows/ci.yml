@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+  pull_request:
+# CI only reads the repo and publishes nothing.
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      # The commit-message check needs the history and tags.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - run: pnpm --dir ui install --frozen-lockfile
+      - run: pnpm --dir ui check
+      - run: pnpm --dir ui test
+      - run: pnpm --dir ui build
+      - run: node tools/check-repo-hygiene.mjs
+      - run: node --test tools/release/lib.test.mjs
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo test --locked --workspace
+      # ts-rs regenerates ui/src/lib/bindings during the tests: committed bindings must match.
+      - run: git diff --exit-code ui/src/lib/bindings

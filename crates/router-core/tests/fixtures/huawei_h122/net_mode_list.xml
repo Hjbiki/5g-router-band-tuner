@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<AccessList>
+<Access>00</Access>
+<Access>08</Access>
+<Access>03</Access>
+</AccessList>
+<BandList>
+<Band>
+<Name>All bands</Name>
+<Value>3fffffff</Value>
+</Band>
+</BandList>
+<LTEBandList>
+<LTEBand>
+<Name>LTE BC1&#x2F;LTE BC3&#x2F;LTE BC5&#x2F;LTE BC7&#x2F;LTE BC8&#x2F;LTE BC20&#x2F;LTE BC28&#x2F;LTE BC32&#x2F;LTE BC34&#x2F;LTE BC38&#x2F;LTE BC39&#x2F;LTE BC40&#x2F;LTE BC41&#x2F;LTE BC42&#x2F;LTE BC43</Name>
+<Value>7e2880800d5</Value>
+</LTEBand>
+<LTEBand>
+<Name>All bands</Name>
+<Value>7fffffffffffffff</Value>
+</LTEBand>
+</LTEBandList>
+</response>

@@ -1,0 +1,43 @@
+name: New router
+description: Report how the app behaves on a router it doesn't support yet.
+labels: ["new router"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Please attach the file the app made: **Help add support** on its notice, or **About › Export diagnostics…** if it can log in to your router. Read it before you attach it. Never put your router's password here.
+        Don't attach browser HAR captures, screenshots of the router's device page, or `events.jsonl`.
+  - type: input
+    id: model
+    attributes:
+      label: Router model
+      description: As printed on the label, for example "H158-381".
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware version
+      description: From the label, for example "v5.0". The same model name can cover different hardware.
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: From the router's web page (Device information).
+  - type: input
+    id: operator
+    attributes:
+      label: Operator and country
+      description: Optional. Band choices differ between networks.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What worked, what didn't, and any error message the app showed.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics file
+      description: Drag the saved `router-band-tuner-diagnostics.json` here. If the export stopped with a privacy-check message, quote the message instead.

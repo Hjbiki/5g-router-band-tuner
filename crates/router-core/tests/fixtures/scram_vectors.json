@@ -1,0 +1,32 @@
+[
+  {
+    "name": "ascii_password",
+    "password": "correct horse",
+    "first_nonce": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d",
+    "salt": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "iterations": 1000,
+    "server_nonce": "0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3d0a1b2c3dSyntheticServerNonceA1",
+    "clientproof": "a71c296318778aaa1d6b1d08b261b14605ad0868bd3bf831df06014d198e41be",
+    "serversignature": "2e0738d3f598a55274755c82673007cf103b524d926c11963af1a941f1e91a9e"
+  },
+  {
+    "name": "arabic_password",
+    "password": "كلمة-سر-٢٠٢٦",
+    "first_nonce": "1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c",
+    "salt": "a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7",
+    "iterations": 1000,
+    "server_nonce": "1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4c1f2e3d4cSyntheticServerNonceB2",
+    "clientproof": "f6a50e8280d0f4def837ca942056ec8b9c474d0311b872ee0564d53ca5fd5f8a",
+    "serversignature": "e764f8e0de14fcdf194c790f0fde03f32036f90f8c18fe4b29cdcf39da1173dd"
+  },
+  {
+    "name": "low_iterations",
+    "password": "x",
+    "first_nonce": "99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc",
+    "salt": "01010101010101010101010101010101",
+    "iterations": 1,
+    "server_nonce": "99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbcc99aabbccSyntheticServerNonceC3",
+    "clientproof": "ece90568e5be685a26369100b9428bdb9da3cc133b88b917584fa1832d1b7193",
+    "serversignature": "3ddf81c70567f3e6d368b6aff6235d84d3693766a3cef82dba7bc0b708c354c0"
+  }
+]

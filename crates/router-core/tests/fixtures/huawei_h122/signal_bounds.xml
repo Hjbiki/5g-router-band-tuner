@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC: derived from signal.xml -->
+<response>
+<pci>101</pci>
+<sc></sc>
+<cell_id>0123456-001</cell_id>
+<rsrq>&lt;-19.5dB</rsrq>
+<rsrp>&gt;=-44dBm</rsrp>
+<rssi>-72dBm</rssi>
+<sinr>0dB</sinr>
+<rscp></rscp>
+<ecio></ecio>
+<mode>7</mode>
+<ulbandwidth>20MHz</ulbandwidth>
+<dlbandwidth>20MHz</dlbandwidth>
+<txpower>PPusch:2dBm PPucch:2dBm PSrs:2dBm PPrach:2dBm</txpower>
+<tdd></tdd>
+<ul_mcs>mcsUpCarrier1:0</ul_mcs>
+<dl_mcs>mcsDownCarrier1Code0:1 mcsDownCarrier1Code1:1</dl_mcs>
+<earfcn>DL:1650 UL:19650</earfcn>
+<rrc_status>1</rrc_status>
+<rac></rac>
+<lac></lac>
+<tac>100</tac>
+<band>3</band>
+<nei_cellid>No1:11No2:12No3:13No4:14</nei_cellid>
+<plmn>42004</plmn>
+<ims>0</ims>
+<wdlfreq></wdlfreq>
+<lteulfreq>17550</lteulfreq>
+<ltedlfreq>18500</ltedlfreq>
+<transmode>TM[4]</transmode>
+<enodeb_id>0123456</enodeb_id>
+<cqi0>6</cqi0>
+<cqi1>6</cqi1>
+<ulfrequency>1755000kHz</ulfrequency>
+<dlfrequency>1850000kHz</dlfrequency>
+<scc_pci>202</scc_pci>
+<arfcn></arfcn>
+<bsic></bsic>
+<rxlev></rxlev>
+</response>

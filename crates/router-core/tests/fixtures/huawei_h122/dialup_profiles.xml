@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<CurrentProfile>1</CurrentProfile>
+<Profiles>
+<Profile>
+<Index>1</Index>
+<IsValid>1</IsValid>
+<Name>Operator internet</Name>
+<ApnIsStatic>1</ApnIsStatic>
+<ApnName>internet.example</ApnName>
+<DialupNum>*99#</DialupNum>
+<Username></Username>
+<Password></Password>
+<AuthMode>0</AuthMode>
+<IpIsStatic></IpIsStatic>
+<IpAddress></IpAddress>
+<DnsIsStatic></DnsIsStatic>
+<PrimaryDns></PrimaryDns>
+<SecondaryDns></SecondaryDns>
+<ReadOnly>2</ReadOnly>
+<iptype>2</iptype>
+</Profile>
+<Profile>
+<Index>2</Index>
+<IsValid>1</IsValid>
+<Name>Work &amp; travel</Name>
+<ApnIsStatic>1</ApnIsStatic>
+<ApnName>work.example</ApnName>
+<DialupNum>*99#</DialupNum>
+<Username>demo-user</Username>
+<Password>synthetic-secret-1234</Password>
+<AuthMode>2</AuthMode>
+<IpIsStatic></IpIsStatic>
+<IpAddress></IpAddress>
+<DnsIsStatic></DnsIsStatic>
+<PrimaryDns></PrimaryDns>
+<SecondaryDns></SecondaryDns>
+<ReadOnly>0</ReadOnly>
+<iptype>0</iptype>
+</Profile>
+<Profile>
+<Index>3</Index>
+<IsValid>0</IsValid>
+<Name>Network default</Name>
+<ApnIsStatic>0</ApnIsStatic>
+<ApnName></ApnName>
+<Username></Username>
+<Password>******</Password>
+<AuthMode>1</AuthMode>
+<ReadOnly>0</ReadOnly>
+<iptype>1</iptype>
+</Profile>
+<Profile>
+<Index></Index>
+<Name>No index</Name>
+</Profile>
+</Profiles>
+</response>

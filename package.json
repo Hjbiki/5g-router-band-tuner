@@ -1,0 +1,12 @@
+{
+  "private": true,
+  "version": "0.1.0",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "packageManager": "pnpm@10.34.3",
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  },
+  "scripts": {
+    "tauri": "tauri"
+  }
+}

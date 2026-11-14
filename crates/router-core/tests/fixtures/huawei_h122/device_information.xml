@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<response>
+<DeviceName>H122-373</DeviceName>
+<SerialNumber>84a4b44b71a57c66</SerialNumber>
+<Imei>868798300390493</Imei>
+<Imsi>182111475949911</Imsi>
+<Iccid>8488800967080762957</Iccid>
+<Msisdn></Msisdn>
+<HardwareVersion>WL1H122M</HardwareVersion>
+<SoftwareVersion>11.0.2.21&#40;H329SP1C7002&#41;</SoftwareVersion>
+<WebUIVersion>WEBUI 11.0.2.1&#40;W2SP11C7002&#41;</WebUIVersion>
+<MacAddress1>02:00:00:00:00:0F</MacAddress1>
+<MacAddress2></MacAddress2>
+<WanIPAddress>192.0.2.17</WanIPAddress>
+<wan_dns_address>192.0.2.53,192.0.2.54</wan_dns_address>
+<WanIPv6Address>2001:db8::1</WanIPv6Address>
+<wan_ipv6_dns_address>2001:db8::1</wan_ipv6_dns_address>
+<ProductFamily>LTE</ProductFamily>
+<Classify>cpe</Classify>
+<supportmode>LTE|WCDMA|GSM</supportmode>
+<workmode>LTE</workmode>
+<submask>192.0.2.21</submask>
+<Mccmnc>42004</Mccmnc>
+<iniversion>H122-373-CUST 10.0.3.1&#40;C375&#41;</iniversion>
+<uptime>80694</uptime>
+<ImeiSvn>01</ImeiSvn>
+<WifiMacAddrWl0>02:00:00:00:00:15</WifiMacAddrWl0>
+<WifiMacAddrWl1>02:00:00:00:00:16</WifiMacAddrWl1>
+<spreadname_en>HUAWEI 5G CPE Pro 2</spreadname_en>
+<spreadname_zh>华为 5G CPE Pro 2</spreadname_zh>
+</response>

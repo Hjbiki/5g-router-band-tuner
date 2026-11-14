@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 250" width="900" role="img" direction="ltr">
+<style>
+  text { font-family: -apple-system,'Segoe UI','Noto Sans','Noto Sans Arabic',Tahoma,Arial,sans-serif; fill: #1f2328; }
+  .sub { fill: #59636e; font-size: 12px; }
+  .box { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.2; }
+  .good { fill: #dafbe1; stroke: #1a7f37; stroke-width: 1.2; }
+  .bad { fill: #ffebe9; stroke: #cf222e; stroke-width: 1.2; }
+  .warn { fill: #fff8c5; stroke: #9a6700; stroke-width: 1.2; }
+  .line { stroke: #59636e; stroke-width: 1.5; fill: none; }
+  .redline { stroke: #cf222e; stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+  .head { fill: #59636e; }
+  .redhead { fill: #cf222e; }
+  .redtext { fill: #cf222e; font-size: 13px; }
+  @media (prefers-color-scheme: dark) {
+    text { fill: #f0f6fc; }
+    .sub { fill: #9198a1; }
+    .box { fill: #21262d; stroke: #6e7681; }
+    .good { fill: #12361f; stroke: #3fb950; }
+    .bad { fill: #3d1416; stroke: #f85149; }
+    .warn { fill: #3a2c07; stroke: #d29922; }
+    .line { stroke: #9198a1; }
+    .redline { stroke: #f85149; }
+    .head { fill: #9198a1; }
+    .redhead { fill: #f85149; }
+    .redtext { fill: #f85149; }
+  }
+</style>
+<rect x="10.0" y="20" width="124" height="62" rx="8" class="box"/>
+<text x="72.0" y="47" text-anchor="middle" font-size="15" font-weight="600">Saved</text>
+<text x="72.0" y="67" text-anchor="middle" class="sub">current bands</text>
+<line x1="136.0" y1="51" x2="159.2" y2="51" class="line"/>
+<path d="M159.2 51 l-7 -4 v8 z" class="head"/>
+<rect x="161.2" y="20" width="124" height="62" rx="8" class="box"/>
+<text x="223.2" y="47" text-anchor="middle" font-size="15" font-weight="600">Applied</text>
+<text x="223.2" y="67" text-anchor="middle" class="sub">new bands sent</text>
+<line x1="287.2" y1="51" x2="310.4" y2="51" class="line"/>
+<path d="M310.4 51 l-7 -4 v8 z" class="head"/>
+<rect x="312.4" y="20" width="124" height="62" rx="8" class="box"/>
+<text x="374.4" y="47" text-anchor="middle" font-size="15" font-weight="600">Checked</text>
+<text x="374.4" y="67" text-anchor="middle" class="sub">read back</text>
+<line x1="438.4" y1="51" x2="461.6" y2="51" class="line"/>
+<path d="M461.6 51 l-7 -4 v8 z" class="head"/>
+<rect x="463.6" y="20" width="124" height="62" rx="8" class="warn"/>
+<text x="525.6" y="47" text-anchor="middle" font-size="15" font-weight="600">Reconnected</text>
+<text x="525.6" y="67" text-anchor="middle" class="sub">up to 90 s</text>
+<line x1="589.6" y1="51" x2="612.8" y2="51" class="line"/>
+<path d="M612.8 51 l-7 -4 v8 z" class="head"/>
+<rect x="614.8" y="20" width="124" height="62" rx="8" class="warn"/>
+<text x="676.8" y="47" text-anchor="middle" font-size="15" font-weight="600">Trial</text>
+<text x="676.8" y="67" text-anchor="middle" class="sub">3 min</text>
+<line x1="740.8" y1="51" x2="764.0" y2="51" class="line"/>
+<path d="M764.0 51 l-7 -4 v8 z" class="head"/>
+<rect x="766.0" y="20" width="124" height="62" rx="8" class="good"/>
+<text x="828.0" y="47" text-anchor="middle" font-size="15" font-weight="600">Kept</text>
+<text x="828.0" y="67" text-anchor="middle" class="sub">done</text>
+<line x1="525.6" y1="84" x2="525.6" y2="124" class="redline"/>
+<line x1="676.8" y1="84" x2="676.8" y2="124" class="redline"/>
+<line x1="525.6" y1="124" x2="676.8" y2="124" class="redline"/>
+<text x="663.2" y="147" text-anchor="middle" class="redtext">Internet lost</text>
+<line x1="601.2" y1="124" x2="601.2" y2="162" class="redline"/>
+<path d="M601.2 162 l-4 -7 h8 z" class="redhead"/>
+<rect x="476.2" y="165" width="250" height="62" rx="8" class="bad"/>
+<text x="601.2" y="192" text-anchor="middle" font-size="15" font-weight="600">Previous bands come back</text>
+<text x="601.2" y="212" text-anchor="middle" class="sub">by themselves</text>
+<rect x="160.0" y="165" width="250" height="62" rx="8" class="box"/>
+<text x="285.0" y="192" text-anchor="middle" font-size="15" font-weight="600">If that fails: Auto</text>
+<text x="285.0" y="212" text-anchor="middle" class="sub">last resort</text>
+<line x1="474.2" y1="196" x2="412.0" y2="196" class="redline"/>
+<path d="M412.0 196 l7 -4 v8 z" class="redhead"/>
+</svg>

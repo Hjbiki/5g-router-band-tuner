@@ -1,0 +1,56 @@
+# Browser captures can contain session tokens, nonces and device identifiers.
+# Never commit them in any form.
+HAR
+*.har
+*.har.json
+
+# Raw router responses saved at the repo root (they contain cell IDs, TAC and PCIs,
+# which can locate the user). Redacted copies live in crates/router-core/tests/fixtures/.
+/*.xml
+/captures/
+
+# Third-party bookmarklet with an unknown licence: analysed in docs/API_NOTES.md, not redistributed.
+huawei-manager.js
+
+# Secrets and local environment
+.env
+.env.*
+*.pem
+*.key
+
+# Rust
+target/
+
+# Node / frontend
+node_modules/
+ui/dist/
+.vite/
+
+# Tauri generated
+src-tauri/gen/
+
+# App runtime data accidentally created in the repo during development
+settings.json
+pending-change.json
+journal-archive/
+events.jsonl*
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Speed-test results (location-sensitive) and the Ookla CLI, which is downloaded per PC and never redistributed
+speedtests.jsonl*
+speedtest.exe
+ookla-speedtest-*.zip
+
+# M2 history database, the automatic speed-test state and the imported speed-test log
+history.db*
+auto-speedtest.json
+speedtests.jsonl.imported
+
+# "Save router page scripts" output: the router maker's web UI code. Never commit it.
+router-page-scripts*.zip
