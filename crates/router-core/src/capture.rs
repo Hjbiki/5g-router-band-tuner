@@ -265,6 +265,7 @@ impl Recorder {
                 x.response_headers = header_names(&redirect["headers"]);
                 x.note = Some(NOTE_REDIRECT);
                 x.redirect_to = Some(match Url::parse(to) {
+                    _ if to.len() > MAX_URL_BYTES => TOO_LONG.to_string(),
                     Ok(u) if u.origin().ascii_serialization() == self.origin => {
                         u.path().to_string()
                     }
@@ -472,7 +473,7 @@ fn sent_parts(x: &Exchange) -> Sent {
     let Some(body) = x.request_body.as_deref() else {
         return sent;
     };
-    if let Some(fields) = form_fields(body, x.request_type.as_deref()) {
+    if let Some(fields) = form_fields(body) {
         for (k, v) in fields {
             if let (true, Some(v)) = (picks_command(&k), v.as_str()) {
                 sent.commands.push(v.to_string());
@@ -573,33 +574,28 @@ fn login_shaped(x: &Exchange) -> bool {
     named || picked || IN_NAME.iter().chain(IN_COMMAND).any(|w| unread.contains(w))
 }
 
-/// `a=1&b=2`, by its declared type or by its look. XML and JSON are read as what they are
-/// whatever the type says (jQuery calls everything a form), and every key must read like a
-/// form's field: a key is copied to the file as a name.
-fn form_fields(body: &str, content_type: Option<&str>) -> Option<Map<String, Value>> {
+/// `a=1&b=2`, by its look alone: what a request declares itself to be is the page's word (jQuery
+/// calls everything a form). XML and JSON are read as what they are, every pair needs its `=`,
+/// and every key must read like a form's field, because a key is copied to the file as a name.
+fn form_fields(body: &str) -> Option<Map<String, Value>> {
     let text = body.trim();
     if text.is_empty() || text.starts_with(['{', '[', '<']) {
         return None;
     }
-    let declared = content_type.is_some_and(|c| c.contains("x-www-form-urlencoded"));
-    let looks =
-        !text.contains(char::is_whitespace) && text.split('&').all(|pair| pair.contains('='));
-    // Base64 with its padding reads like one pair too.
-    let base64 = text.ends_with('=')
-        && text
-            .trim_end_matches('=')
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/');
+    let pairs: Vec<&str> = text.split('&').collect();
+    let looks = !text.contains(char::is_whitespace) && pairs.iter().all(|pair| pair.contains('='));
+    // One word and a trailing `=` is a bare value, or base64 with its padding.
+    let bare = pairs.len() == 1 && text.ends_with('=');
     let field = |key: &str| {
         (1..=64).contains(&key.len())
             && key
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "_.-[]".contains(c))
     };
-    let keys_fit = text
-        .split('&')
+    let keys_fit = pairs
+        .iter()
         .all(|pair| field(pair.split('=').next().unwrap_or("")));
-    if !(declared || looks) || base64 || !keys_fit {
+    if !looks || bare || !keys_fit {
         return None;
     }
     // The URL parser undoes the percent-encoding the same way a server would.
@@ -611,30 +607,42 @@ fn form_fields(body: &str, content_type: Option<&str>) -> Option<Map<String, Val
     )
 }
 
-/// A name the file shows as it is (a header's): still with no identifier inside it.
-fn name_text(s: &str) -> String {
-    redact_identifier_tokens(s).0
+/// A header's name as the file shows it. The page chooses its headers' names, so one that
+/// doesn't read like a header's name, or that was hidden as a value, is starred.
+fn shown_header(red: &Redactor, name: &str) -> String {
+    let fits = (1..=MAX_HEADER_NAME).contains(&name.len())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if fits && identifier_hits(name).is_empty() && !red.holds_secret(name) {
+        name.to_string()
+    } else {
+        "*".to_string()
+    }
 }
 
-/// A path as the file shows it: no session, no random token, and no folder named in capitals
-/// only, which is how some routers put the session in the path.
-fn shown_path(path: &str) -> String {
+/// A path as the file shows it, a segment at a time: no session and no random token
+/// (`clean_path`), no folder named in capitals only (how some routers put the session in the
+/// path), no long number, and nothing that was hidden as a value somewhere in the recording
+/// (`/api/hosts/Hibi-Laptop`).
+fn shown_path(red: &Redactor, path: &str) -> String {
     let cleaned = probe::clean_path(path);
     let segment = |s: &str| {
         let folder = s.len() >= 12 && s.chars().all(|c| c.is_ascii_uppercase());
-        if folder {
+        let number = s.len() >= 5 && s.chars().all(|c| c.is_ascii_digit());
+        let stem = s.rsplit_once('.').map_or(s, |(stem, _)| stem);
+        if folder || number || red.hidden_word(s) || red.hidden_word(stem) {
             "*".to_string()
         } else {
             s.to_string()
         }
     };
-    name_text(
-        &cleaned
-            .split('/')
-            .map(segment)
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
+    let shown = cleaned
+        .split('/')
+        .map(segment)
+        .collect::<Vec<_>>()
+        .join("/");
+    redact_identifier_tokens(&shown).0
 }
 
 /// What the recording says the router is. Joined to the file after the scan, by the label rule,
@@ -662,7 +670,11 @@ impl Facts {
             // A list of the devices on the network has "device name" fields too, so that name
             // counts only when its value is shaped like a router's model.
             let loose = probe::model_field(text).filter(|m| probe::model_in_text(m).is_some());
-            self.model = probe::strict_model_field(text).or(loose);
+            // A bare "model" is in lists of household devices too ("iPhone 12"), so it counts
+            // only in an answer that also gives a version.
+            let versioned = probe::hardware_field(text).or_else(|| probe::firmware_field(text));
+            let bare = probe::bare_model_field(text).filter(|_| versioned.is_some());
+            self.model = probe::strict_model_field(text).or(bare).or(loose);
         }
         if self.hardware.is_none() {
             self.hardware = probe::hardware_field(text);
@@ -683,6 +695,28 @@ impl Facts {
     }
 }
 
+/// The names at the top of a JSON answer: the fields a request's `cmd` list may name.
+fn answer_names(x: &Exchange) -> BTreeSet<String> {
+    x.body
+        .as_deref()
+        .and_then(|b| serde_json::from_str::<Value>(b).ok())
+        .and_then(|v| v.as_object().map(|m| m.keys().cloned().collect()))
+        .unwrap_or_default()
+}
+
+/// A script the router keeps as a file: nothing after its name, and a header that says when it
+/// was last changed. A script made on the spot (JSONP, a generated `status.js`) holds live values.
+fn kept_file(x: &Exchange) -> bool {
+    let dated = x
+        .response_headers
+        .iter()
+        .any(|h| h.eq_ignore_ascii_case("etag") || h.eq_ignore_ascii_case("last-modified"));
+    x.kind == Kind::Script
+        && x.path.to_ascii_lowercase().ends_with(".js")
+        && x.query.is_empty()
+        && dated
+}
+
 /// One exchange for the file, and its script's text when that may still be included.
 fn entry<'a>(
     red: &mut Redactor,
@@ -697,15 +731,18 @@ fn entry<'a>(
     } else {
         Rules::Capture
     });
+    red.set_answer_names(answer_names(x));
 
     let mut out = Map::new();
     out.insert("n".into(), json!(n));
     out.insert("method".into(), json!(x.method));
-    out.insert("path".into(), json!(shown_path(&x.path)));
+    out.insert("path".into(), json!(shown_path(red, &x.path)));
     out.insert("kind".into(), json!(x.kind));
     if login {
         out.insert("login".into(), json!(true));
     }
+    // What the page sends.
+    red.set_sent(true);
     if !x.query.is_empty() {
         let fields: Map<String, Value> = x
             .query
@@ -717,26 +754,36 @@ fn entry<'a>(
             red.json(&Value::Object(fields), &format!("{label}.query")),
         );
     }
-    let names = |list: &[String]| -> Vec<String> { list.iter().map(|h| name_text(h)).collect() };
-    out.insert("requestHeaders".into(), json!(names(&x.request_headers)));
+    let headers = |red: &Redactor, list: &[String]| -> Vec<String> {
+        list.iter().map(|h| shown_header(red, h)).collect()
+    };
+    out.insert(
+        "requestHeaders".into(),
+        json!(headers(red, &x.request_headers)),
+    );
     if let Some(kind) = &x.request_type {
         out.insert("requestType".into(), json!(kind));
     }
     if let Some(body) = &x.request_body {
         let at = format!("{label}.request");
-        let sent = match form_fields(body, x.request_type.as_deref()) {
+        let sent = match form_fields(body) {
             Some(fields) => red.json(&Value::Object(fields), &at),
             None => red.body(body, &at),
         };
         out.insert("request".into(), sent);
     }
+    // What the router answers.
+    red.set_sent(false);
     out.insert("status".into(), json!(x.status));
     if let Some(kind) = &x.content_type {
         out.insert("type".into(), json!(kind));
     }
-    out.insert("responseHeaders".into(), json!(names(&x.response_headers)));
+    out.insert(
+        "responseHeaders".into(),
+        json!(headers(red, &x.response_headers)),
+    );
     if let Some(to) = &x.redirect_to {
-        out.insert("redirectTo".into(), json!(shown_path(to)));
+        out.insert("redirectTo".into(), json!(shown_path(red, to)));
     }
 
     let mut note = x.note;
@@ -754,16 +801,15 @@ fn entry<'a>(
             let paths: Vec<String> = paths
                 .iter()
                 .take(MAX_API_PATHS)
-                .map(|p| shown_path(p))
+                .map(|p| shown_path(red, p))
                 .collect();
             out.insert("apiPaths".into(), json!(paths));
-            let script = x.kind == Kind::Script && x.path.to_ascii_lowercase().ends_with(".js");
             note = Some(if x.kind == Kind::Page {
                 NOTE_PAGE
             } else {
                 NOTE_CODE
             });
-            if include_code && script && !login {
+            if include_code && kept_file(x) && !login {
                 code = Some(text);
             }
         }
@@ -777,8 +823,39 @@ fn entry<'a>(
 }
 
 /// The cleaned file. `Err` lists what the last scan found in it: nothing may be written then.
+///
+/// The recording is cleaned twice. The first pass only learns what gets hidden; the second,
+/// knowing that, never keeps in one place a value that is hidden in another, in whatever order
+/// the page asked for things. So the same text is hidden everywhere, instead of the save being
+/// refused because of it.
 pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, Vec<String>> {
-    let mut red = Redactor::with_rules(Rules::Capture);
+    let mut first = Redactor::with_rules(Rules::Capture);
+    for (i, x) in exchanges.iter().enumerate() {
+        let _ = entry(&mut first, i + 1, x, false);
+    }
+    build_knowing(exchanges, opts, &first)
+}
+
+/// The second pass, and the scan of what it made.
+fn build_knowing(
+    exchanges: &[Exchange],
+    opts: &BuildOptions<'_>,
+    first: &Redactor,
+) -> Result<String, Vec<String>> {
+    // What in an exchange comes from the router's page. The rest of the file is this app's own
+    // words ("static", "router", "response"), which a hidden value may well be too.
+    const FROM_ROUTER: &[&str] = &[
+        "path",
+        "query",
+        "requestHeaders",
+        "request",
+        "responseHeaders",
+        "redirectTo",
+        "response",
+        "apiPaths",
+        "text",
+    ];
+    let mut red = Redactor::knowing(Rules::Capture, first);
     let mut facts = Facts::default();
     let mut list = Vec::with_capacity(exchanges.len());
     let mut code = Vec::new();
@@ -799,21 +876,31 @@ pub fn build(exchanges: &[Exchange], opts: &BuildOptions<'_>) -> Result<String, 
             x.insert("text".into(), json!(redact_identifier_tokens(text).0));
         }
     }
+    let from_router: Vec<&Value> = list
+        .iter()
+        .flat_map(|x| FROM_ROUTER.iter().filter_map(move |key| x.get(*key)))
+        .collect();
+    let from_router = serde_json::to_string(&from_router).map_err(|e| vec![e.to_string()])?;
     let mut file = json!({
         "format": FORMAT,
         "appVersion": opts.app_version,
         "generatedAtMs": opts.generated_at_ms,
         "codeIncluded": opts.include_code,
         "limitHit": opts.limit,
-        "router": { "vendor": facts.vendor },
+        "router": {},
         "exchanges": list,
     });
     let text = serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])?;
-    let leaks = red.leaks(&text);
+    let mut leaks = red.pattern_leaks(&text);
+    if red.holds_secret(&from_router) {
+        leaks.insert(0, "an original identifier is still present".to_string());
+    }
     if !leaks.is_empty() {
         return Err(leaks);
     }
-    // Versions look like IP addresses, so these join after the scan, by their own rule.
+    // These join after the scan, by their own rules: the vendor is one of a fixed list of
+    // names, and a version looks like an IP address.
+    file["router"]["vendor"] = json!(facts.vendor);
     file["router"]["model"] = json!(Facts::label(&facts.model));
     file["router"]["hardware"] = json!(Facts::label(&facts.hardware));
     file["router"]["firmware"] = json!(Facts::label(&facts.firmware));
@@ -877,7 +964,14 @@ mod tests {
         body: &str,
     ) {
         sent(rec, id, method, url, kind, request, json!({}));
-        answered(rec, id, 200, mime, json!({ "Content-Type": mime }));
+        // Dated, as a file the router keeps is: only that kind of script may be included.
+        answered(
+            rec,
+            id,
+            200,
+            mime,
+            json!({ "Content-Type": mime, "ETag": "1" }),
+        );
         assert_eq!(finished(rec, id), Some(Ask::ResponseBody(id.to_string())));
         rec.response_body(
             id,
@@ -1562,25 +1656,6 @@ mod tests {
         assert_eq!(x[0]["note"], json!(NOTE_PAGE));
         assert!(x[0].get("text").is_none());
         assert!(!text.contains("AA:BB:CC:DD:EE:FF") && !text.contains("356789012345678"));
-    }
-
-    #[test]
-    fn the_last_scan_refuses_a_file_that_still_holds_a_secret() {
-        // The Wi-Fi name is hidden where it is named. The same text under a state's name reads
-        // like a state, so only the scan of the finished file can see that it is still there.
-        let mut rec = recorder();
-        exchange(
-            &mut rec,
-            "1",
-            "GET",
-            "http://192.168.8.1/api/wlan",
-            "Fetch",
-            json!({}),
-            "application/json",
-            r#"{"WifiSsid":"hibi_home_net","ppp_status":"hibi_home_net"}"#,
-        );
-        let found = build(&rec.into_exchanges(), &opts()).unwrap_err();
-        assert_eq!(found, ["an original identifier is still present"]);
     }
 
     #[test]
@@ -2276,6 +2351,9 @@ mod tests {
             "http://192.168.8.1/goform/get?cmd={}&multi_data=1",
             list.replace(',', "%2C")
         );
+        // The answer has each field that was asked for: that is what makes them field names.
+        let answer: Map<String, Value> = names.iter().map(|n| (n.clone(), json!("1"))).collect();
+        let answer = Value::Object(answer).to_string();
         exchange(
             &mut rec,
             "1",
@@ -2284,7 +2362,7 @@ mod tests {
             "XHR",
             json!({}),
             "application/json",
-            "{}",
+            &answer,
         );
         let (_, v) = built(rec, &opts());
         assert_eq!(v["exchanges"][0]["query"]["cmd"], json!(list));
@@ -2597,6 +2675,330 @@ mod tests {
         assert!(
             xml.contains("<WebUIVersion>11.0.2.21(H057SP5C983)</WebUIVersion>"),
             "{xml}"
+        );
+    }
+
+    // ---- Found by the second pass of the independent review, 2026-11-14 ----
+
+    #[test]
+    fn a_path_segment_that_was_hidden_elsewhere_is_starred() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/hosts",
+            "application/json",
+            r#"{"hosts":[{"name":"Hibi-Laptop"}],"sms":[{"phone":"966500000000"}]}"#,
+        );
+        post(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/hosts/Hibi-Laptop/block",
+            json!({}),
+            "application/json",
+            "{}",
+        );
+        poll(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/api/sms/966500000000",
+            "application/json",
+            "{}",
+        );
+        poll(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/api/sms/20261114",
+            "application/json",
+            "{}",
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"];
+        assert_eq!(x[1]["path"], json!("/api/hosts/*/block"));
+        assert_eq!(x[2]["path"], json!("/api/sms/*"));
+        // A long number in a path is somebody's, whether or not it was seen before.
+        assert_eq!(x[3]["path"], json!("/api/sms/*"));
+        assert!(!text.contains("Hibi-Laptop") && !text.contains("966500000000"));
+    }
+
+    #[test]
+    fn a_declared_form_without_a_pair_is_not_a_form() {
+        let mut rec = recorder();
+        form_post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/wifi/password",
+            "hunter22",
+        );
+        form_post(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/wifi/password",
+            "hunter23=",
+        );
+        let (text, _) = built(rec, &opts());
+        assert!(
+            !text.contains("hunter22") && !text.contains("hunter23"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_code_the_page_sends_is_hidden_and_a_code_the_router_answers_is_kept() {
+        let mut rec = recorder();
+        post(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/check",
+            json!({ "postData": r#"{"name":"admin","code":"7421","mode":"3"}"# }),
+            "application/json",
+            r#"{"code":"0","result":"a1b2c3d4","status":"KDIRFAVOLMZYJHTG","nck_code":"12345678"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        let x = &v["exchanges"][0];
+        assert!(x.get("login").is_none());
+        // What the page sends under "code" is something a person typed.
+        assert_ne!(x["request"]["code"], json!("7421"));
+        assert_eq!(x["request"]["mode"], json!("3"));
+        assert_eq!(x["response"]["code"], json!("0"));
+        for gone in ["7421", "a1b2c3d4", "KDIRFAVOLMZYJHTG", "12345678"] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+    }
+
+    #[test]
+    fn a_list_of_field_names_keeps_only_the_fields_the_answer_has() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/goform/get?cmd=lte_rsrp%2CHibiHome%2Chunter22%2C1234",
+            "application/json",
+            r#"{"lte_rsrp":"-97"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(v["exchanges"][0]["query"]["cmd"], json!("lte_rsrp,*,*,*"));
+        assert!(!text.contains("HibiHome") && !text.contains("hunter22"));
+    }
+
+    #[test]
+    fn a_value_hidden_in_one_place_is_not_kept_in_another() {
+        // The Wi-Fi name is hidden where it is named. The same text under a state's name reads
+        // like a state, so it is hidden there too, wherever in the recording it comes.
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/ppp",
+            "application/json",
+            r#"{"ppp_status":"hibi_home_net","band":"3"}"#,
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/wlan",
+            "application/json",
+            r#"{"WifiSsid":"hibi_home_net"}"#,
+        );
+        let list = rec.into_exchanges();
+        let text = build(&list, &opts()).expect("a clean file");
+        let v: Value = serde_json::from_str(&text).unwrap();
+        assert!(!text.contains("hibi_home_net"));
+        assert_eq!(v["exchanges"][0]["response"]["band"], json!("3"));
+        // Without the first pass the value is kept before its name is met, and only the scan of
+        // the finished file stands between it and the disk.
+        let blind = Redactor::with_rules(Rules::Capture);
+        assert_eq!(
+            build_knowing(&list, &opts(), &blind).unwrap_err(),
+            ["an original identifier is still present"]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_word_hidden_somewhere_never_stops_the_save() {
+        let mut rec = recorder();
+        // A stock OpenWrt names itself "OpenWrt", and settings say "static" in sensitive places.
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/cgi-bin/luci/admin/status",
+            "application/json",
+            r#"{"hostname":"OpenWrt","dns_mode":"static","net_mode":"static","wifi_enable":"1","lte_rsrp":"-97"}"#,
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/js/luci.js",
+            "application/javascript",
+            "function luci(){ return 'openwrt'; }",
+        );
+        poll(
+            &mut rec,
+            "3",
+            "http://192.168.8.1/api/board",
+            "application/json",
+            r#"{"hostname":"router"}"#,
+        );
+        poll(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/api/router/info",
+            "application/json",
+            r#"{"band":"3"}"#,
+        );
+        poll(
+            &mut rec,
+            "5",
+            "http://192.168.8.1/api/fw",
+            "text/xml",
+            r#"<fw version="11.0.2.21"><band>3</band></fw>"#,
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(v["router"]["vendor"], json!("OpenWrt"));
+        assert_eq!(v["exchanges"][0]["response"]["lte_rsrp"], json!("-97"));
+        assert_eq!(v["exchanges"][0]["response"]["net_mode"], json!("static"));
+        assert_eq!(v["exchanges"][3]["response"]["band"], json!("3"));
+        assert!(!text.contains("11.0.2.21"));
+        assert!(v["exchanges"][4]["response"]
+            .as_str()
+            .unwrap()
+            .contains("<band>3</band>"));
+    }
+
+    #[test]
+    fn text_that_arrives_in_pieces_is_hidden() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/x",
+            "text/xml",
+            "<response><result>a1b2&amp;c3d4&amp;e5f6</result><status>ab<!-- x -->cd</status><band>3</band></response>",
+        );
+        let (text, v) = built(rec, &opts());
+        for gone in ["a1b2", "c3d4", "e5f6", ">ab", "cd<"] {
+            assert!(!text.contains(gone), "{gone} is in the file");
+        }
+        assert!(v["exchanges"][0]["response"]
+            .as_str()
+            .unwrap()
+            .contains("<band>3</band>"));
+    }
+
+    #[test]
+    fn a_script_is_included_only_when_it_is_a_file_the_router_keeps() {
+        let mut rec = recorder();
+        let mut script = |id: &str, url: &str, headers: Value, body: &str| {
+            sent(&mut rec, id, "GET", url, "Script", json!({}), json!({}));
+            answered(&mut rec, id, 200, "application/javascript", headers);
+            finished(&mut rec, id);
+            rec.response_body(
+                id,
+                &json!({ "body": body, "base64Encoded": false }).to_string(),
+            );
+        };
+        script(
+            "1",
+            "http://192.168.8.1/js/app.js",
+            json!({ "ETag": "1" }),
+            "function app(){}",
+        );
+        script(
+            "2",
+            "http://192.168.8.1/js/lib.js",
+            json!({ "Last-Modified": "x" }),
+            "function lib(){}",
+        );
+        // Made on the spot: nothing says the router keeps it as a file.
+        script(
+            "3",
+            "http://192.168.8.1/js/runtime.js",
+            json!({}),
+            "var ssid = 'made-now';",
+        );
+        script(
+            "4",
+            "http://192.168.8.1/js/status.js?cb=1",
+            json!({ "ETag": "1" }),
+            "cb({a:1})",
+        );
+        let with_code = BuildOptions {
+            include_code: true,
+            ..opts()
+        };
+        let (text, v) = built(rec, &with_code);
+        let x = &v["exchanges"];
+        assert_eq!(x[0]["text"], json!("function app(){}"));
+        assert_eq!(x[1]["text"], json!("function lib(){}"));
+        assert!(x[2].get("text").is_none() && x[3].get("text").is_none());
+        assert!(!text.contains("made-now") && !text.contains("cb({a:1})"));
+    }
+
+    #[test]
+    fn a_device_model_in_a_list_is_not_the_routers() {
+        let model_of = |body: &str| {
+            let mut rec = recorder();
+            poll(
+                &mut rec,
+                "1",
+                "http://192.168.8.1/api/info",
+                "application/json",
+                body,
+            );
+            built(rec, &opts()).1["router"]["model"].clone()
+        };
+        assert_eq!(
+            model_of(r#"{"clients":[{"model":"iPhone 12"}]}"#),
+            json!(null)
+        );
+        assert_eq!(
+            model_of(r#"{"model":"MC888","firmware_version":"1.0.1"}"#),
+            json!("MC888")
+        );
+        assert_eq!(model_of(r#"{"model_name":"MC8020"}"#), json!("MC8020"));
+    }
+
+    #[test]
+    fn a_header_name_that_is_not_a_name_is_starred() {
+        let mut rec = recorder();
+        let headers = json!({ "X-Hibi Laptop": "1", "X-Requested-With": "XMLHttpRequest", "hibi_home_net": "1" });
+        let request = json!({ "headers": headers });
+        exchange(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/api/wlan",
+            "XHR",
+            request,
+            "application/json",
+            r#"{"WifiSsid":"hibi_home_net"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(
+            v["exchanges"][0]["requestHeaders"],
+            json!(["*", "*", "X-Requested-With"])
+        );
+        assert!(!text.contains("Hibi") && !text.contains("hibi_home_net"));
+    }
+
+    #[test]
+    fn a_very_long_redirect_is_not_kept() {
+        let mut rec = recorder();
+        sent(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/go",
+            "Document",
+            json!({}),
+            json!({}),
+        );
+        let long = format!("http://192.168.8.1/{}", "a".repeat(100 * 1024));
+        let hop = json!({ "redirectResponse": { "status": 302, "headers": {} } });
+        sent(&mut rec, "1", "GET", &long, "Document", json!({}), hop);
+        assert_eq!(
+            rec.into_exchanges()[0].redirect_to.as_deref(),
+            Some(TOO_LONG)
         );
     }
 }

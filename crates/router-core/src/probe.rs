@@ -159,9 +159,16 @@ pub(crate) fn strict_model_field(text: &str) -> Option<String> {
     field(
         text,
         &T,
-        "modelname|model_name|devicemodel|device_model|productname|product_name|productclass|product_model|model",
+        "modelname|model_name|devicemodel|device_model|productname|product_name|productclass|product_model",
         &A,
     )
+}
+
+/// A bare `model`. Lists of household devices have one too, so the caller decides when it counts.
+pub(crate) fn bare_model_field(text: &str) -> Option<String> {
+    static T: OnceLock<Regex> = OnceLock::new();
+    static A: OnceLock<Regex> = OnceLock::new();
+    field(text, &T, "model", &A)
 }
 
 pub(crate) fn hardware_field(text: &str) -> Option<String> {

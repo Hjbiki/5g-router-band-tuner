@@ -224,6 +224,9 @@ const CAPTURE_SENSITIVE_WORDS: &[&str] = &[
     "auth",
     "zip",
     "otp",
+    "nck",
+    "uuid",
+    "guid",
 ];
 /// Names of readings and of what the router is: their values are kept when they read like one.
 const CAPTURE_READING_PARTS: &[&str] = &[
@@ -295,6 +298,35 @@ fn ordinary_word(s: &str) -> bool {
     s.len() <= 24
         && s.chars()
             .all(|c| c.is_ascii_alphabetic() || "_.- ".contains(c))
+}
+
+/// One short word in one case, like `static`, `auto` or `enable`: what a setting says. Settings
+/// with sensitive names say these all the time, and the same word elsewhere is no leak.
+fn enum_word(s: &str) -> bool {
+    let mixed =
+        s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase());
+    s.len() <= 10 && s.chars().all(|c| c.is_ascii_alphabetic()) && !mixed
+}
+
+/// A name a router uses in its answers (`code`, `result`, `status`). When the page sends
+/// something under such a name, a person typed it.
+fn answer_word(name: &str) -> bool {
+    const ANSWERS: &[&str] = &[
+        "code", "result", "status", "state", "error", "errno", "errcode", "ret", "retcode",
+        "response",
+    ];
+    keep_class(name) == Some(Keep::State)
+        && words(name).iter().any(|w| ANSWERS.contains(&w.as_str()))
+}
+
+/// Where a kept value sits, which decides how it is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spot {
+    /// A JSON string, which may hold XML.
+    Json,
+    /// An element's text: the only place the leak scan lets a version or a band mask through.
+    XmlText,
+    XmlAttr,
 }
 
 /// A name's words, lowercased: split at anything that isn't a letter or digit, where a small
@@ -404,14 +436,17 @@ fn state_word(s: &str) -> bool {
         s.chars().any(|c| c.is_ascii_uppercase()) && s.chars().any(|c| c.is_ascii_lowercase());
     // A token handed back as a "result" has digits all through it.
     let random = s.len() >= 12 && digits >= 4;
+    // With nothing joining its parts, three digits among letters is a token (`a1b2c3d4`), and so
+    // is a long run of letters with too few vowels to be words.
+    let joined = s.contains('_') || s.contains('-');
+    let vowels = s.chars().filter(|c| "aeiouAEIOU".contains(*c)).count();
+    let letters = s.chars().all(|c| c.is_ascii_alphabetic());
+    let token = !joined
+        && ((digits >= 3 && digits < s.len())
+            || (letters && s.len() >= 12 && vowels * 4 < s.len()));
     !s.is_empty()
         && s.len() <= NAME_MAX
-        && (numeric || (wordy && !random && (s.contains('_') || !mixed)))
-}
-
-/// `rsrp,sinr,lte_band`: the field names a command asks for.
-fn name_list(s: &str) -> bool {
-    s.len() <= NAME_LIST_MAX && s.contains(',') && s.split(',').all(plain_name)
+        && (numeric || (wordy && !random && !token && (joined || !mixed)))
 }
 
 /// The object or the method of a ubus call, like `zwrt_router.api` or `get`.
@@ -448,6 +483,15 @@ pub struct Redactor {
     secrets: BTreeSet<String>,
     /// Values hidden only for their name, under the capture's rules.
     soft: BTreeSet<String>,
+    /// Every value hidden under a sensitive name or in a login, ordinary words too (but not a
+    /// setting's one word): a path segment that is one of them is somebody's.
+    inside: BTreeSet<String>,
+    /// What an earlier pass over the same recording hid (`knowing`).
+    known: BTreeSet<String>,
+    /// The page is sending what is being cleaned; the router isn't answering it.
+    sent: bool,
+    /// The names in the answer to the request being cleaned.
+    answer_names: BTreeSet<String>,
     generated: BTreeSet<String>,
     counter: u32,
     names: u32,
@@ -522,6 +566,33 @@ impl Redactor {
         self.rules = rules;
     }
 
+    /// A second pass over a recording, knowing what the first one hid. A value hidden in one
+    /// place is then never kept in another, in whatever order the exchanges came.
+    pub fn knowing(rules: Rules, earlier: &Redactor) -> Self {
+        let known = earlier
+            .secrets
+            .iter()
+            .filter(|s| !earlier.generated.contains(*s))
+            .cloned()
+            .collect();
+        Self {
+            rules,
+            known,
+            inside: earlier.inside.clone(),
+            ..Self::default()
+        }
+    }
+
+    /// Whether what comes next is what the page sends (true) or what the router answers.
+    pub fn set_sent(&mut self, sent: bool) {
+        self.sent = sent;
+    }
+
+    /// The names in the answer to the request that comes next.
+    pub fn set_answer_names(&mut self, names: BTreeSet<String>) {
+        self.answer_names = names;
+    }
+
     /// Whether everything under this name is hidden, whatever its children are called.
     fn sensitive(&self, name: &str) -> bool {
         match self.rules {
@@ -535,7 +606,7 @@ impl Redactor {
     fn hides(&self, name: &str) -> bool {
         match self.rules {
             Rules::Diagnostics => is_sensitive(name),
-            Rules::Capture => !capture_keeps(name),
+            Rules::Capture => !capture_keeps(name) || (self.sent && answer_word(name)),
             Rules::ShapeOnly => true,
         }
     }
@@ -562,7 +633,8 @@ impl Redactor {
         }
         let ordinary = ordinary_word(value);
         match hide {
-            Hide::Named => {
+            // The app's own reads remember everything, as they always did.
+            Hide::Named if self.rules == Rules::Diagnostics || !enum_word(value) => {
                 self.secrets.insert(value.to_string());
             }
             Hide::Inside if !ordinary => {
@@ -574,6 +646,9 @@ impl Redactor {
             _ => {}
         }
         let secret = hide != Hide::Unlisted;
+        if secret && value.len() <= 64 && !enum_word(value) {
+            self.inside.insert(value.to_string());
+        }
         if self.rules == Rules::ShapeOnly || (secret && self.rules == Rules::Capture) {
             return HIDDEN.to_string();
         }
@@ -617,14 +692,39 @@ impl Redactor {
         let mut writer = Writer::new(Vec::new());
         // The open elements: name, whether they or a parent are sensitive, and the name written.
         let mut open: Vec<(String, bool, String)> = Vec::new();
+        // Stricter rules than the app's own reads: an element's text is judged whole, so here is
+        // the text so far and the number of pieces it came in. A reference, a comment or CDATA
+        // breaks it into pieces, and each piece alone could pass for something it isn't.
+        let strict = self.rules != Rules::Diagnostics;
+        let mut text: Option<(String, u32)> = None;
         loop {
+            let event = reader.read_event().ok()?;
+            if strict {
+                let (piece, breaks) = match &event {
+                    Event::Text(t) => (String::from_utf8_lossy(t).into_owned(), 1),
+                    Event::CData(c) => (String::from_utf8_lossy(c).into_owned(), 2),
+                    Event::GeneralRef(_) | Event::Comment(_) | Event::PI(_) => (String::new(), 1),
+                    // The declaration and the doctype are free text of their own.
+                    Event::Decl(_) | Event::DocType(_) => continue,
+                    _ => (String::new(), 0),
+                };
+                if breaks > 0 {
+                    let (so_far, pieces) = text.get_or_insert((String::new(), 0));
+                    so_far.push_str(&piece);
+                    *pieces += breaks;
+                    continue;
+                }
+                if let Some((raw, pieces)) = text.take() {
+                    let written = self.xml_text(&raw, pieces, &open, label);
+                    writer
+                        .write_event(Event::Text(BytesText::from_escaped(written)))
+                        .ok()?;
+                }
+            }
             let secret = open.last().is_some_and(|o| o.1);
             let inside = open.last().map(|o| o.0.clone()).unwrap_or_default();
             let at = format!("{label}:{inside}");
-            // Stricter rules than the app's own reads: a value is checked by its own element too.
-            let strict = self.rules != Rules::Diagnostics;
-            let unlisted = strict && !secret && self.hides(&inside);
-            let event = match reader.read_event().ok()? {
+            let event = match event {
                 Event::Eof => break,
                 Event::Start(e) => {
                     let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
@@ -644,35 +744,16 @@ impl Redactor {
                     let (_, _, shown) = open.pop()?;
                     Event::End(BytesEnd::new(shown))
                 }
-                Event::Text(t)
-                    if (secret || unlisted) && !t.iter().all(u8::is_ascii_whitespace) =>
-                {
-                    let hide = if secret {
-                        self.named(&inside)
-                    } else {
-                        Hide::Unlisted
-                    };
-                    let fake = self.stand_in(&String::from_utf8_lossy(&t), &at, hide);
+                // From here on: the app's own reads, as they always were.
+                Event::Text(t) if secret && !t.iter().all(u8::is_ascii_whitespace) => {
+                    let fake = self.value(&String::from_utf8_lossy(&t), &at);
                     Event::Text(BytesText::from_escaped(fake))
                 }
-                Event::Text(t) if strict && !t.iter().all(u8::is_ascii_whitespace) => {
-                    let kept = self.kept(&String::from_utf8_lossy(&t), &inside, &at, true);
-                    Event::Text(BytesText::from_escaped(kept))
-                }
-                // Under the stricter rules CDATA is free text wherever it sits.
-                Event::CData(c) if secret || strict => {
-                    let hide = if secret {
-                        self.named(&inside)
-                    } else {
-                        Hide::Unlisted
-                    };
-                    let fake = self.stand_in(&String::from_utf8_lossy(&c), &at, hide);
+                Event::CData(c) if secret => {
+                    let fake = self.value(&String::from_utf8_lossy(&c), &at);
                     Event::Text(BytesText::from_escaped(fake))
                 }
                 Event::Comment(_) | Event::DocType(_) | Event::PI(_) => continue,
-                // A reference can spell out anything a character at a time, past every check, and
-                // the declaration is free text too.
-                Event::GeneralRef(_) | Event::Decl(_) if strict => continue,
                 Event::GeneralRef(_) if secret => continue,
                 other => other,
             };
@@ -682,6 +763,30 @@ impl Redactor {
             return None;
         }
         String::from_utf8(writer.into_inner()).ok()
+    }
+
+    /// An element's whole text under the stricter rules. `pieces` over one means something broke
+    /// it up, and then it is hidden whatever its name.
+    fn xml_text(
+        &mut self,
+        raw: &str,
+        pieces: u32,
+        open: &[(String, bool, String)],
+        label: &str,
+    ) -> String {
+        if raw.chars().all(|c| c.is_ascii_whitespace()) {
+            return raw.to_string();
+        }
+        let (inside, secret) = open.last().map(|o| (o.0.clone(), o.1)).unwrap_or_default();
+        let at = format!("{label}:{inside}");
+        if secret {
+            let why = self.named(&inside);
+            self.stand_in(raw, &at, why)
+        } else if pieces > 1 || self.hides(&inside) {
+            self.stand_in(raw, &at, Hide::Unlisted)
+        } else {
+            self.kept(raw, &inside, &at, Spot::XmlText)
+        }
     }
 
     /// `name` is the element's own name, which decides what is hidden; `shown` is what is written.
@@ -708,7 +813,7 @@ impl Redactor {
                 Cow::Owned(self.stand_in(&raw, &at, why).into_bytes())
             } else if self.rules != Rules::Diagnostics {
                 let raw = String::from_utf8_lossy(&attr.value).into_owned();
-                Cow::Owned(self.kept(&raw, &key, &at, true).into_bytes())
+                Cow::Owned(self.kept(&raw, &key, &at, Spot::XmlAttr).into_bytes())
             } else {
                 attr.value
             };
@@ -724,7 +829,8 @@ impl Redactor {
     /// A name as the file shows it. Under the stricter rules a router's page chooses the names, so
     /// one that doesn't read like a field's name is data: it gets a numbered stand-in.
     fn name(&mut self, name: &str) -> String {
-        if self.rules == Rules::Diagnostics || plain_name(name) {
+        let hidden = self.secrets.contains(name) || self.known.contains(name);
+        if self.rules == Rules::Diagnostics || (plain_name(name) && !hidden) {
             return name.to_string();
         }
         self.names += 1;
@@ -737,7 +843,8 @@ impl Redactor {
             Some((prefix, local)) => plain_name(prefix) && plain_name(local),
             None => plain_name(name),
         };
-        if self.rules == Rules::Diagnostics || plain {
+        let hidden = self.secrets.contains(name) || self.known.contains(name);
+        if self.rules == Rules::Diagnostics || (plain && !hidden) {
             return name.to_string();
         }
         self.names += 1;
@@ -789,7 +896,7 @@ impl Redactor {
             ),
             Value::String(s) => Value::String(match self.rules {
                 Rules::Diagnostics => self.xml(s, label),
-                _ if !self.hides(key) => self.kept(s, key, label, false),
+                _ if !self.hides(key) => self.kept(s, key, label, Spot::Json),
                 _ => self.stand_in(s, label, Hide::Unlisted),
             }),
             Value::Number(n) if self.rules != Rules::Diagnostics => {
@@ -829,13 +936,31 @@ impl Redactor {
     }
 
     /// A value the stricter rules let through by its name. It must still read like a reading or a
-    /// state, and hold no identifier.
-    fn kept(&mut self, text: &str, name: &str, label: &str, xml_leaf: bool) -> String {
-        if !xml_leaf && text.contains('<') {
+    /// state, hold no identifier, and not be something that was hidden elsewhere.
+    fn kept(&mut self, text: &str, name: &str, label: &str, spot: Spot) -> String {
+        if spot == Spot::Json && text.contains('<') {
             return self.xml(text, label);
         }
-        if words(name).iter().any(|w| w == "cmd") && name_list(text) {
-            return text.to_string();
+        if self.holds_secret(text) {
+            return self.stand_in(text, label, Hide::Unlisted);
+        }
+        // `cmd=rsrp,sinr,lte_band`: the field names a command asks for. Each is kept only when
+        // the answer really has a field of that name, so nothing else can ride in the list.
+        if text.contains(',')
+            && text.len() <= NAME_LIST_MAX
+            && words(name).iter().any(|w| w == "cmd")
+        {
+            let items: Vec<&str> = text
+                .split(',')
+                .map(|item| {
+                    if plain_name(item) && self.answer_names.contains(item) {
+                        item
+                    } else {
+                        "*"
+                    }
+                })
+                .collect();
+            return items.join(",");
         }
         let state = keep_class(name) == Some(Keep::State);
         if !text.is_ascii() || !plain_value(text) || (state && !state_word(text)) {
@@ -853,7 +978,7 @@ impl Redactor {
                 .chars()
                 .all(|c| c.is_ascii_hexdigit() || "x, ".contains(c));
         let band = name.to_ascii_lowercase().ends_with("band") && mask && only("MAC");
-        if xml_leaf && (version || band) {
+        if spot == Spot::XmlText && (version || band) {
             return text.to_string();
         }
         redact_identifier_tokens(text).0
@@ -889,22 +1014,45 @@ impl Redactor {
         }
     }
 
-    /// Whether `text`, as it is and not yet escaped for a file, holds a value this redactor hid.
-    /// For text that can't be parsed by name (a router's script), before it is let into a file.
+    /// Whether `text` holds a value this redactor hid for being sensitive, now or in the pass
+    /// before. A value that is one plain word must be there as a whole word, so `enable` isn't
+    /// found in `wifi_enable`; anything else is looked for as it is, with and without the
+    /// backslashes a file or a script puts before a quote.
+    pub fn holds_secret(&self, text: &str) -> bool {
+        let loose = text.replace('\\', "");
+        let tokens: BTreeSet<&str> = text.split(|c: char| !word(c)).collect();
+        self.secrets
+            .iter()
+            .chain(&self.known)
+            .filter(|s| !self.generated.contains(*s))
+            .any(|s| {
+                if s.chars().all(word) {
+                    s.len() >= 4 && tokens.contains(s.as_str())
+                } else {
+                    s.len() >= 6 && written_in(text, &loose, s)
+                }
+            })
+    }
+
+    /// Whether this exact word was hidden under a sensitive name or in a login. For a path's
+    /// segments: `/api/hosts/Hibi-Laptop` names the device the list of hosts hid.
+    pub fn hidden_word(&self, word: &str) -> bool {
+        self.inside.contains(word) || self.secrets.contains(word) || self.known.contains(word)
+    }
+
+    /// Whether `text`, as it is and not yet escaped for a file, holds a value this redactor hid,
+    /// for whatever reason. For text that can't be parsed by name (a router's script), before it
+    /// is let into a file.
     pub fn holds_hidden(&self, text: &str) -> bool {
         let loose = text.replace('\\', "");
-        let hard = self
-            .secrets
-            .iter()
-            .any(|s| s.len() >= 6 && !self.generated.contains(s) && written_in(text, &loose, s));
-        hard || self.soft.iter().any(|s| written_in(text, &loose, s))
+        self.holds_secret(text) || self.soft.iter().any(|s| written_in(text, &loose, s))
     }
 
     /// The leak scan of redact-har.mjs over the finished text. Any hit blocks the export.
     pub fn leaks(&self, text: &str) -> Vec<String> {
         let mut found = Vec::new();
-        // An original that already is a documentation value ("2001:db8::1") maps to itself.
         let loose = text.replace('\\', "");
+        // An original that already is a documentation value ("2001:db8::1") maps to itself.
         if self
             .secrets
             .iter()
@@ -912,16 +1060,18 @@ impl Redactor {
         {
             found.push("an original identifier is still present".to_string());
         }
+        found.extend(self.pattern_leaks(text));
+        found
+    }
+
+    /// The part of the leak scan that looks for identifiers by their shape.
+    pub fn pattern_leaks(&self, text: &str) -> Vec<String> {
         // In the finished JSON a line break is `\n`, which would hide what follows it.
         let plain = text
             .replace("\\n", " ")
             .replace("\\t", " ")
             .replace("\\r", " ");
-        found.extend(pattern_hits(
-            &strip_harmless_fields(&plain),
-            &self.generated,
-        ));
-        found
+        pattern_hits(&strip_harmless_fields(&plain), &self.generated)
     }
 }
 
