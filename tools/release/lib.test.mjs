@@ -324,6 +324,24 @@ test("a build that left no app exe stops the release: the README's portable link
   });
 });
 
+test("the installer offers every language the app has, and asks which one", () => {
+  // The app's languages are the JSON files in ui/src/lib/i18n; the installer names its own.
+  const installerName = { en: "English", ar: "Arabic" };
+  const codes = readdirSync(new URL("../../ui/src/lib/i18n/", import.meta.url))
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => f.slice(0, -".json".length));
+  const conf = JSON.parse(readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"));
+  const nsis = conf.bundle?.windows?.nsis ?? {};
+  for (const code of codes) {
+    assert.ok(installerName[code], `add the installer's name for the app language "${code}" to this test`);
+    assert.ok(nsis.languages?.includes(installerName[code]), `the installer has no ${installerName[code]}`);
+  }
+  // English first: it is what the installer falls back to when Windows is in neither language.
+  assert.equal(nsis.languages?.[0], "English");
+  // Someone on an English Windows who reads only Arabic must be able to choose.
+  assert.equal(nsis.displayLanguageSelector, true);
+});
+
 test("the upload command names the branch and the one tag, never every tag", () => {
   assert.equal(pushCommand("1.0.0"), "git push origin main v1.0.0");
   assert.ok(!pushCommand("1.0.0").includes("--tags"));
