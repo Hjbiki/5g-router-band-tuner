@@ -162,6 +162,12 @@ describe('RouterRecording', () => {
     const box = screen.getByRole('textbox')
     expect(list.compareDocumentPosition(box) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(screen.queryByText(t('recording.readableNone'))).toBeNull()
+    // The list is of values. What else can be read in the file is said, not left out.
+    expect(screen.getByText(t('recording.readableNote'))).toBeTruthy()
+    for (const lang of ['en', 'ar'] as const) {
+      setLanguage(lang)
+      expect(t('recording.includeCodeHelp')).toMatch(lang === 'en' ? /list/ : /القائمة/)
+    }
   })
 
   it('says how many more readable values the file has when the list is cut', async () => {

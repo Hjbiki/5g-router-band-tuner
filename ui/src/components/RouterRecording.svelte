@@ -201,6 +201,7 @@
       {:else}
         <p>{t('recording.readableNone')}</p>
       {/if}
+      <p class="k">{t('recording.readableNote')}</p>
       <p class="k">
         <span>{t('recording.requests', { n: count(preview.requests) })}</span>
         <span class="sep" aria-hidden="true">·</span>

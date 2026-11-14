@@ -1853,6 +1853,66 @@ mod tests {
     }
 
     #[test]
+    fn a_cell_number_is_hidden_whatever_else_its_name_says() {
+        // A PCI, a TAC or a cell or station id is a short number, and short numbers aren"t on the
+        // list a person checks. So the name alone has to hide it, even when the same name also
+        // carries a word that would keep a number (`lock`, `code`, `status`, `mode`, `state`).
+        const NAMES: &[&str] = &[
+            "pci",
+            "lte_pci",
+            "nr_pci_lock",
+            "pci_lock_state",
+            "tac",
+            "tac_code",
+            "lac",
+            "lac_code",
+            "enb_id",
+            "enodeb_lock",
+            "gnb_id_status",
+            "nci_mode",
+            "eci_code",
+            "cell_id",
+            "cellid_lock",
+            "cell_lock_status",
+            "LockedCellId",
+            "ServingCellStatus",
+            "nr_cell_lock",
+            "physical_cell_id",
+            "tracking_area_code",
+            "enbid",
+            "gnbid",
+            "cgi",
+            "global_cell_id_mode",
+        ];
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/cell",
+            "application/json",
+            "{\"pci\":\"71000\",\"lte_pci\":\"71001\",\"nr_pci_lock\":\"71002\",\"pci_lock_state\":\"71003\",\"tac\":\"71004\",\"tac_code\":\"71005\",\"lac\":\"71006\",\"lac_code\":\"71007\",\"enb_id\":\"71008\",\"enodeb_lock\":\"71009\",\"gnb_id_status\":\"71010\",\"nci_mode\":\"71011\",\"eci_code\":\"71012\",\"cell_id\":\"71013\",\"cellid_lock\":\"71014\",\"cell_lock_status\":\"71015\",\"LockedCellId\":\"71016\",\"ServingCellStatus\":\"71017\",\"nr_cell_lock\":\"71018\",\"physical_cell_id\":\"71019\",\"tracking_area_code\":\"71020\",\"enbid\":\"71021\",\"gnbid\":\"71022\",\"cgi\":\"71023\",\"global_cell_id_mode\":\"71024\"}",
+        );
+        poll(
+            &mut rec,
+            "2",
+            "http://192.168.8.1/api/cellxml",
+            "text/xml",
+            "<response><pci>72000</pci><lte_pci>72001</lte_pci><nr_pci_lock>72002</nr_pci_lock><pci_lock_state>72003</pci_lock_state><tac>72004</tac><tac_code>72005</tac_code><lac>72006</lac><lac_code>72007</lac_code><enb_id>72008</enb_id><enodeb_lock>72009</enodeb_lock><gnb_id_status>72010</gnb_id_status><nci_mode>72011</nci_mode><eci_code>72012</eci_code><cell_id>72013</cell_id><cellid_lock>72014</cellid_lock><cell_lock_status>72015</cell_lock_status><LockedCellId>72016</LockedCellId><ServingCellStatus>72017</ServingCellStatus><nr_cell_lock>72018</nr_cell_lock><physical_cell_id>72019</physical_cell_id><tracking_area_code>72020</tracking_area_code><enbid>72021</enbid><gnbid>72022</gnbid><cgi>72023</cgi><global_cell_id_mode>72024</global_cell_id_mode><band>3</band></response>",
+        );
+        let built = build_with_readable(&rec.into_exchanges(), &opts()).expect("a clean file");
+        let shown: Vec<&str> = NAMES
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                built.text.contains(&format!("71{i:03}"))
+                    || built.text.contains(&format!("72{i:03}"))
+            })
+            .map(|(_, name)| *name)
+            .collect();
+        assert!(shown.is_empty(), "still readable under: {shown:?}");
+    }
+
+    #[test]
     fn the_header_looks_past_a_version_it_cannot_show() {
         let mut rec = recorder();
         exchange(
