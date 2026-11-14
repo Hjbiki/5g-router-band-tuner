@@ -24,14 +24,17 @@ use std::time::{Duration, Instant};
 use router_core::capture::{Ask, Exchange, Limit, Recorder};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
+#[cfg(windows)]
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2, ICoreWebView2DevToolsProtocolEventReceivedEventArgs,
     COREWEBVIEW2_PERMISSION_STATE_DENY,
 };
+#[cfg(windows)]
 use webview2_com::{
     take_pwstr, CallDevToolsProtocolMethodCompletedHandler,
     DevToolsProtocolEventReceivedEventHandler, PermissionRequestedEventHandler,
 };
+#[cfg(windows)]
 use windows_core::{HSTRING, PWSTR};
 
 /// The window's label. No capability names it, which is part of the seal.
@@ -140,6 +143,21 @@ pub fn open<R: Runtime>(
     title: &str,
     visible: bool,
 ) -> Result<Recording, String> {
+    // The recorder listens through WebView2. A window that couldn't be recorded isn't opened.
+    #[cfg(not(windows))]
+    return Err("recording needs Windows".to_string());
+    #[cfg(windows)]
+    open_sealed(app, router, profiles, title, visible)
+}
+
+#[cfg(windows)]
+fn open_sealed<R: Runtime>(
+    app: &AppHandle<R>,
+    router: &Url,
+    profiles: &Path,
+    title: &str,
+    visible: bool,
+) -> Result<Recording, String> {
     let args = browser_args(router).ok_or("the router's address isn't a web address")?;
     let recorder = Recorder::new(router).ok_or("the router's address isn't a web address")?;
     let recorder = Arc::new(Mutex::new(recorder));
@@ -188,6 +206,7 @@ pub fn open<R: Runtime>(
     })
 }
 
+#[cfg(windows)]
 fn event_json(args: Option<ICoreWebView2DevToolsProtocolEventReceivedEventArgs>) -> String {
     let Some(args) = args else {
         return String::new();
@@ -200,6 +219,7 @@ fn event_json(args: Option<ICoreWebView2DevToolsProtocolEventReceivedEventArgs>)
     }
 }
 
+#[cfg(windows)]
 /// Asks the browser for something, and gives the answer to `then`. A failed call still answers,
 /// with nothing, so the recorder can note that the body isn't there.
 fn call(core: &ICoreWebView2, method: &str, params: &str, then: impl FnOnce(String) + 'static) {
@@ -218,6 +238,7 @@ fn call(core: &ICoreWebView2, method: &str, params: &str, then: impl FnOnce(Stri
     }
 }
 
+#[cfg(windows)]
 /// Switches the recording on, then asks for the router's page: nothing the page does is missed.
 fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
     let started = Instant::now();

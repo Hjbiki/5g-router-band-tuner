@@ -32,6 +32,7 @@ use base64::Engine as _;
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::{json, Map, Value};
+use ts_rs::TS;
 
 use crate::diagnostics::{identifier_hits, redact_identifier_tokens, Redactor, Rules};
 use crate::probe;
@@ -82,8 +83,9 @@ impl Kind {
 }
 
 /// Why a recording stopped taking more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub enum Limit {
     Requests,
     Size,

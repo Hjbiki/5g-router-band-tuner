@@ -1,12 +1,12 @@
 pub mod autoscan;
 pub mod band_history;
-#[cfg(windows)]
 pub mod capture_window;
 pub mod commands;
 pub mod credentials;
 pub mod history;
 pub mod notify;
 pub mod privacy_check;
+pub mod recording;
 pub mod router_probe;
 pub mod settings;
 pub mod speedtest;
@@ -54,12 +54,19 @@ pub fn run() {
                     tray::hide_to_tray(window.app_handle());
                 }
             }
+            // Closing the recording window by hand throws its recording away.
+            if matches!(event, WindowEvent::Destroyed) && window.label() == capture_window::LABEL {
+                recording::window_closed(window.app_handle());
+            }
         })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             // Fail rather than start empty: the old folder may hold an unconfirmed change.
             router_core::legacy::migrate_data_dir(&data_dir)?;
             std::fs::create_dir_all(&data_dir)?;
+            // A recording that ended badly leaves its browser profile, with the router's session
+            // cookie in it. None can be open this early.
+            capture_window::sweep_profiles(&data_dir);
             let settings = Settings::load(&data_dir);
             // Before anything can log: every event from here on is mirrored into history.db.
             let history = history::install(&data_dir);
@@ -85,6 +92,7 @@ pub fn run() {
             autoscan::on_start(app.handle());
             updates::start(app.handle());
             app.manage(router_probe::ProbeState::default());
+            app.manage(recording::CaptureState::default());
             router_probe::start(app.handle());
             history::start(app.handle());
             speedtest::schedule::start(app.handle());
@@ -150,6 +158,13 @@ pub fn run() {
             commands::save_page_scripts,
             privacy_check::privacy_check,
             privacy_check::dns_check,
+            // Recording a router's own page
+            recording::capture_start,
+            recording::capture_status,
+            recording::capture_stop,
+            recording::capture_preview,
+            recording::capture_save,
+            recording::capture_discard,
             // Speed test
             speedtest::run_speed_test,
             speedtest::cancel_speed_test,
