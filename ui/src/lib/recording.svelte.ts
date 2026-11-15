@@ -3,7 +3,7 @@ import type { CaptureStatus } from './bindings/CaptureStatus'
 import { api, onCaptureStatus } from './backend'
 import { app } from './store.svelte'
 
-const IDLE: CaptureStatus = { phase: 'idle', requests: 0, limit: null }
+const IDLE: CaptureStatus = { phase: 'idle', requests: 0, limit: null, enough: false }
 
 /**
  * A recording of the router's own page: where it stands, and the cleaned file once it is stopped.

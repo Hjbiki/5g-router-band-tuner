@@ -422,6 +422,53 @@ impl Recorder {
     pub fn into_exchanges(self) -> Vec<Exchange> {
         self.list
     }
+
+    /// What the recording holds so far, for telling the person when they can stop.
+    pub fn seen(&self) -> Seen {
+        let key = |x: &'_ Exchange| (x.method.clone(), x.path.clone());
+        // The last login the page sent: a GET whose path says "login" is the page asking
+        // whether anyone is logged in, not somebody logging in.
+        let login = self
+            .list
+            .iter()
+            .rposition(|x| !matches!(x.method.as_str(), "GET" | "HEAD") && login_shaped(x));
+        let all: BTreeSet<_> = self.list.iter().map(key).collect();
+        let new_since_login = login.map(|at| {
+            let before: BTreeSet<_> = self.list[..=at].iter().map(key).collect();
+            let after: BTreeSet<_> = self.list[at + 1..].iter().map(key).collect();
+            after.difference(&before).count()
+        });
+        Seen {
+            requests: self.list.len(),
+            distinct: all.len(),
+            new_since_login,
+        }
+    }
+}
+
+/// What a recording holds so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Seen {
+    pub requests: usize,
+    /// Distinct requests, by method and path. A page that has finished loading only repeats
+    /// itself (it polls), so this stops growing.
+    pub distinct: usize,
+    /// How many distinct requests came after the page's last login that it hadn't made before.
+    /// `None` while the page has sent no login.
+    pub new_since_login: Option<usize>,
+}
+
+/// This many new requests after a login say the router let the page in. A login it refused
+/// brings an error and little else.
+pub const LOGGED_IN_AFTER: usize = 5;
+/// How long nothing new must have come before the page counts as loaded.
+pub const SETTLED_AFTER: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Whether the person can stop now: the page logged in, the router let it in, and for `quiet`
+/// it has asked for nothing it hadn't asked before. Until then a closed window loses what the
+/// page was about to ask, which is most of what a driver needs.
+pub fn enough(seen: Seen, quiet: std::time::Duration) -> bool {
+    seen.new_since_login.is_some_and(|n| n >= LOGGED_IN_AFTER) && quiet >= SETTLED_AFTER
 }
 
 pub struct BuildOptions<'a> {
@@ -1910,6 +1957,87 @@ mod tests {
             .map(|(_, name)| *name)
             .collect();
         assert!(shown.is_empty(), "still readable under: {shown:?}");
+    }
+
+    #[test]
+    fn enough_is_recorded_once_the_page_is_in_and_has_stopped_asking_for_new_things() {
+        // Nobody should have to count seconds. Closing the window the moment Log In is pressed
+        // loses what the router's page asks next, which is most of what a driver needs.
+        let quiet = SETTLED_AFTER;
+        let mut rec = recorder();
+        let get = |rec: &mut Recorder, id: &str, path: &str| {
+            poll(
+                rec,
+                id,
+                &format!("http://192.168.8.1{path}"),
+                "text/xml",
+                "<response/>",
+            );
+        };
+        // The login page: it asks plenty, and one path even says "login". Nobody logged in.
+        for (i, path) in [
+            "/api/user/state-login",
+            "/api/device/basic_information",
+            "/api/lang",
+        ]
+        .iter()
+        .enumerate()
+        {
+            get(&mut rec, &format!("a{i}"), path);
+        }
+        assert_eq!(rec.seen().new_since_login, None);
+        assert!(!enough(rec.seen(), quiet * 10));
+
+        // A login the router refuses: the page asks the same things again, and little else.
+        let login = json!({ "postData": "<request><username>admin</username><password>x</password></request>" });
+        post(
+            &mut rec,
+            "b1",
+            "http://192.168.8.1/api/user/login",
+            login.clone(),
+            "text/xml",
+            "<error/>",
+        );
+        get(&mut rec, "b2", "/api/user/state-login");
+        get(&mut rec, "b3", "/api/user/remain-wait-time");
+        assert_eq!(rec.seen().new_since_login, Some(1));
+        assert!(!enough(rec.seen(), quiet * 10));
+
+        // The login that works: the router's home page asks for many things it never asked before.
+        post(
+            &mut rec,
+            "c1",
+            "http://192.168.8.1/api/user/login",
+            login,
+            "text/xml",
+            "<response>OK</response>",
+        );
+        for (i, path) in [
+            "/api/monitoring/status",
+            "/api/net/net-mode",
+            "/api/net/current-plmn",
+            "/api/device/information",
+            "/api/system/deviceinfo",
+            "/api/user/state-login",
+        ]
+        .iter()
+        .enumerate()
+        {
+            get(&mut rec, &format!("c{}", i + 2), path);
+        }
+        let seen = rec.seen();
+        // Five are new; the sixth was asked before the login, so it says nothing.
+        assert_eq!(seen.new_since_login, Some(5));
+        assert_eq!(seen.requests, rec.len());
+        // Still loading: not yet. Loaded and only repeating itself: enough.
+        assert!(!enough(seen, quiet / 2));
+        assert!(enough(seen, quiet));
+        // A page that polls keeps asking, but nothing new: the count of distinct requests holds.
+        let before = rec.seen().distinct;
+        get(&mut rec, "d1", "/api/monitoring/status");
+        get(&mut rec, "d2", "/api/monitoring/status");
+        assert_eq!(rec.seen().distinct, before);
+        assert!(rec.seen().requests > seen.requests);
     }
 
     #[test]

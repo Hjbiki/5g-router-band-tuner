@@ -52,8 +52,16 @@
 
   const begin = () =>
     act(async () => {
-      // The window's title and the text of its own Stop item: they say what to do there.
-      refused = await api.captureStart(t('recording.windowTitle'), t('recording.windowStop'))
+      // What the window itself says: its title and its Stop item, before and after enough is
+      // recorded, and the box of steps it opens with.
+      refused = await api.captureStart({
+        title: t('recording.windowTitle'),
+        stop: t('recording.windowStop'),
+        doneTitle: t('recording.windowDoneTitle'),
+        doneStop: t('recording.windowDoneStop'),
+        steps: t('recording.windowSteps'),
+        ok: t('recording.ok'),
+      })
       if (refused) return
       saved = false
       await refresh()
@@ -161,6 +169,7 @@
   {:else if phase === 'recording'}
     <p role="status"><span class="dot" aria-hidden="true"></span>{t('recording.running', { n: count(recording.status.requests) })}</p>
     {#if recording.status.limit}<p class="k" role="status">{t(`recording.limit.${recording.status.limit}`)}</p>{/if}
+    {#if recording.status.enough}<p role="status">{t('recording.ready')}</p>{/if}
     <div class="row">
       <button type="button" class="primary" disabled={busy} onclick={stop}>
         <Square size={16} aria-hidden="true" />{t('recording.stop')}

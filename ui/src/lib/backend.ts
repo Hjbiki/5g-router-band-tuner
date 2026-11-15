@@ -10,6 +10,7 @@ import type { BandOutcome } from './bindings/BandOutcome'
 import type { CapturePreview } from './bindings/CapturePreview'
 import type { CaptureRefusal } from './bindings/CaptureRefusal'
 import type { CaptureStatus } from './bindings/CaptureStatus'
+import type { CaptureTexts } from './bindings/CaptureTexts'
 import type { Bucket } from './bindings/Bucket'
 import type { CredentialStatus } from './bindings/CredentialStatus'
 import type { CsvLabels } from './bindings/CsvLabels'
@@ -124,8 +125,7 @@ export const api = {
     invoke<ExportOutcome>('export_history_csv', { opts, labels }),
   // Recording the router's own page
   /** Opens the router's page in the recording window. A reason comes back when it can't start. */
-  captureStart: (title: string, stopLabel: string) =>
-    invoke<CaptureRefusal | null>('capture_start', { title, stopLabel }),
+  captureStart: (texts: CaptureTexts) => invoke<CaptureRefusal | null>('capture_start', { texts }),
   captureStatus: () => invoke<CaptureStatus>('capture_status'),
   /** Ends the recording and returns what would be saved. Nothing is written. */
   captureStop: () => invoke<CapturePreview>('capture_stop'),

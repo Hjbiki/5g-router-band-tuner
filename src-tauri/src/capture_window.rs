@@ -21,12 +21,18 @@
 //! It is a native menu, the app's own: the router's page can neither draw there nor press it.
 //! Pressing it closes the window, and whoever opened the window decides what a closed window
 //! means (the app keeps the recording for its review).
+//!
+//! The window also says when the person can stop, in its title and on that item: once the page
+//! has logged in and stopped asking for new things (`router_core::capture::enough`). Nobody
+//! should have to count seconds, and a window closed the moment Log In is pressed has lost what
+//! the page was about to ask.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use router_core::capture::{Ask, Exchange, Limit, Recorder};
+use router_core::capture::{self, Ask, Exchange, Limit, Recorder};
 use tauri::menu::{Menu, MenuItem};
 use tauri::webview::{DownloadEvent, NewWindowResponse};
 use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
@@ -118,11 +124,35 @@ fn lock(recorder: &Mutex<Recorder>) -> MutexGuard<'_, Recorder> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// What the window says, in the user's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Texts {
+    /// The window's title while it records.
+    pub title: String,
+    /// Its Stop item while it records.
+    pub stop: String,
+    /// The title once enough is recorded.
+    pub done_title: String,
+    /// The Stop item once enough is recorded.
+    pub done_stop: String,
+}
+
+/// Where a recording stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    pub requests: usize,
+    /// The limit that stopped it taking more, if one did.
+    pub limit: Option<Limit>,
+    /// Enough is recorded: the window has told the person they can close it.
+    pub enough: bool,
+}
+
 /// An open recording window.
 pub struct Recording {
     router: Url,
     recorder: Arc<Mutex<Recorder>>,
     profile: PathBuf,
+    enough: Arc<AtomicBool>,
 }
 
 impl Recording {
@@ -133,13 +163,19 @@ impl Recording {
             router: router.clone(),
             recorder: Arc::new(Mutex::new(Recorder::new(router).expect("a web address"))),
             profile: PathBuf::new(),
+            enough: Arc::default(),
         }
     }
 
-    /// How many requests are recorded so far, and the limit that stopped it, if one did.
-    pub fn progress(&self) -> (usize, Option<Limit>) {
+    /// How many requests are recorded so far, the limit that stopped it if one did, and whether
+    /// the window has said that enough is recorded.
+    pub fn progress(&self) -> Progress {
         let recorder = lock(&self.recorder);
-        (recorder.len(), recorder.limit())
+        Progress {
+            requests: recorder.len(),
+            limit: recorder.limit(),
+            enough: self.enough.load(Ordering::SeqCst),
+        }
     }
 
     /// Ends the recording: closes the window, deletes its profile and hands over what was
@@ -169,22 +205,20 @@ impl Recording {
 }
 
 /// Opens the recording window on the router's own page. `profiles` is a folder for this
-/// recording's browser profile; `title` is the window's title and `stop` the text of the menu
-/// item that ends the recording, both in the user's language. The window is shown to a person;
-/// a test harness keeps it hidden.
+/// recording's browser profile; `texts` is what the window's title and its Stop item say, in
+/// the user's language. The window is shown to a person; a test harness keeps it hidden.
 pub fn open<R: Runtime>(
     app: &AppHandle<R>,
     router: &Url,
     profiles: &Path,
-    title: &str,
-    stop: &str,
+    texts: &Texts,
     visible: bool,
 ) -> Result<Recording, String> {
     // The recorder listens through WebView2. A window that couldn't be recorded isn't opened.
     #[cfg(not(windows))]
     return Err("recording needs Windows".to_string());
     #[cfg(windows)]
-    open_sealed(app, router, profiles, title, stop, visible)
+    open_sealed(app, router, profiles, texts, visible)
 }
 
 #[cfg(windows)]
@@ -192,8 +226,7 @@ fn open_sealed<R: Runtime>(
     app: &AppHandle<R>,
     router: &Url,
     profiles: &Path,
-    title: &str,
-    stop: &str,
+    texts: &Texts,
     visible: bool,
 ) -> Result<Recording, String> {
     let args = browser_args(router).ok_or("the router's address isn't a web address")?;
@@ -204,8 +237,8 @@ fn open_sealed<R: Runtime>(
         .map_or(0, |d| d.as_millis());
     let profile = profiles.join(format!("{PROFILE_PREFIX}{}-{stamp}", std::process::id()));
     let origin = router.origin().ascii_serialization();
-    let stop =
-        MenuItem::with_id(app, STOP_ID, stop, true, None::<&str>).map_err(|e| e.to_string())?;
+    let stop = MenuItem::with_id(app, STOP_ID, &texts.stop, true, None::<&str>)
+        .map_err(|e| e.to_string())?;
     let menu = Menu::with_items(app, &[&stop]).map_err(|e| e.to_string())?;
     let screen = app.primary_monitor().ok().flatten().map(|m| {
         let size = m.size().to_logical::<f64>(m.scale_factor());
@@ -218,7 +251,7 @@ fn open_sealed<R: Runtime>(
         LABEL,
         WebviewUrl::External("about:blank".parse().expect("a valid address")),
     )
-    .title(title)
+    .title(&texts.title)
     .visible(visible)
     .inner_size(width, height)
     .menu(menu)
@@ -251,10 +284,41 @@ fn open_sealed<R: Runtime>(
         })
         .map_err(|e| e.to_string())?;
 
+    // Once a second: has the page logged in and stopped asking for new things? Then the window
+    // says so, where the person is looking. A limit says the same: nothing more will be taken.
+    let enough = Arc::new(AtomicBool::new(false));
+    {
+        let (recorder, enough, texts) = (recorder.clone(), enough.clone(), texts.clone());
+        std::thread::spawn(move || {
+            let mut distinct = 0;
+            let mut changed = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                let (seen, full) = {
+                    let rec = lock(&recorder);
+                    (rec.seen(), rec.limit().is_some())
+                };
+                if seen.distinct != distinct {
+                    distinct = seen.distinct;
+                    changed = Instant::now();
+                }
+                // `full` is also how a finished recording looks from here: the window is gone
+                // then, and telling it anything does nothing.
+                if full || capture::enough(seen, changed.elapsed()) {
+                    enough.store(true, Ordering::SeqCst);
+                    let _ = window.set_title(&texts.done_title);
+                    let _ = stop.set_text(&texts.done_stop);
+                    return;
+                }
+            }
+        });
+    }
+
     Ok(Recording {
         router: router.clone(),
         recorder,
         profile,
+        enough,
     })
 }
 

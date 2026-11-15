@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use router_core::capture::{self, BuildOptions, Exchange, Limit};
 use router_core::SessionView;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State, Url};
 use ts_rs::TS;
 
@@ -36,6 +36,8 @@ const READABLE_MAX: usize = 300;
 const READABLE_BYTES: usize = 120;
 /// What the window's Stop item says when the main window gave it no text.
 const STOP_TEXT: &str = "Stop";
+/// The most the box of steps on the recording window may hold.
+const STEPS_MAX: usize = 400;
 
 struct Stopped {
     exchanges: Arc<Vec<Exchange>>,
@@ -100,19 +102,22 @@ impl CaptureState {
                 phase: CapturePhase::Idle,
                 requests: 0,
                 limit: None,
+                enough: false,
             },
             Flow::Open(recording) => {
-                let (requests, limit) = recording.progress();
+                let now = recording.progress();
                 CaptureStatus {
                     phase: CapturePhase::Recording,
-                    requests: u32::try_from(requests).unwrap_or(u32::MAX),
-                    limit,
+                    requests: u32::try_from(now.requests).unwrap_or(u32::MAX),
+                    limit: now.limit,
+                    enough: now.enough,
                 }
             }
             Flow::Stopped(s) => CaptureStatus {
                 phase: CapturePhase::Stopped,
                 requests: u32::try_from(s.exchanges.len()).unwrap_or(u32::MAX),
                 limit: s.limit,
+                enough: false,
             },
         }
     }
@@ -136,6 +141,28 @@ pub struct CaptureStatus {
     pub requests: u32,
     /// Why the recording stopped taking more, when it did.
     pub limit: Option<Limit>,
+    /// The router's page has logged in and finished loading: the window has told the person
+    /// they can close it.
+    pub enough: bool,
+}
+
+/// What the recording window says, from the main window, in the user's language.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct CaptureTexts {
+    /// The window's title while it records.
+    pub title: String,
+    /// Its Stop item while it records.
+    pub stop: String,
+    /// The title once enough is recorded.
+    pub done_title: String,
+    /// The Stop item once enough is recorded.
+    pub done_stop: String,
+    /// The steps, shown in a box on the window when it opens.
+    pub steps: String,
+    /// That box's one button.
+    pub ok: String,
 }
 
 /// Why a recording can't start now.
@@ -308,14 +335,46 @@ fn short_line(text: &str) -> String {
         .collect()
 }
 
-/// Opens the router's own page in the recording window. `title` is the window's title and
-/// `stop_label` the text of its Stop item, in the user's language. `Ok(Some(why))` when it can't
-/// start now.
+/// What the main window sent, made fit to show: one short line for a title or the Stop item, the
+/// steps with their line breaks and nothing else that isn't text, and never an empty button.
+fn window_words(said: &CaptureTexts) -> (capture_window::Texts, String, String) {
+    let or_stop = |text: &str| {
+        let line = short_line(text);
+        if line.trim().is_empty() {
+            STOP_TEXT.to_string()
+        } else {
+            line
+        }
+    };
+    let steps: String = said
+        .steps
+        .chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .take(STEPS_MAX)
+        .collect();
+    let ok = short_line(&said.ok);
+    (
+        capture_window::Texts {
+            title: short_line(&said.title),
+            stop: or_stop(&said.stop),
+            done_title: short_line(&said.done_title),
+            done_stop: or_stop(&said.done_stop),
+        },
+        steps,
+        if ok.trim().is_empty() {
+            "OK".to_string()
+        } else {
+            ok
+        },
+    )
+}
+
+/// Opens the router's own page in the recording window. `texts` is what that window says, in the
+/// user's language. `Ok(Some(why))` when it can't start now.
 #[tauri::command]
 pub async fn capture_start(
     app: AppHandle,
-    title: String,
-    stop_label: String,
+    texts: CaptureTexts,
     state: State<'_, AppState>,
     cap: State<'_, CaptureState>,
     scan: State<'_, crate::autoscan::ScanState>,
@@ -334,15 +393,26 @@ pub async fn capture_start(
     let Ok(router) = Url::parse(&format!("http://{host}/")) else {
         return Ok(Some(CaptureRefusal::BadAddress));
     };
-    let title = short_line(&title);
-    let mut stop = short_line(&stop_label);
-    if stop.trim().is_empty() {
-        stop = STOP_TEXT.to_string();
-    }
-    let recording = capture_window::open(&app, &router, state.data_dir(), &title, &stop, true)
+    let (words, steps, ok) = window_words(&texts);
+    let recording = capture_window::open(&app, &router, state.data_dir(), &words, true)
         .map_err(CmdError::Message)?;
     *cap.lock() = Flow::Open(recording);
     emit(&app, &cap);
+    // The steps, in a box on the window itself: it is where the person is looking, and the box
+    // is the app's own, which the router's page can neither draw nor answer.
+    if let (Some(window), false) = (
+        app.get_webview_window(capture_window::LABEL),
+        steps.trim().is_empty(),
+    ) {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        app.dialog()
+            .message(steps)
+            .title(words.title)
+            .kind(MessageDialogKind::Info)
+            .buttons(MessageDialogButtons::OkCustom(ok))
+            .parent(&window)
+            .show(|_| {});
+    }
     Ok(None)
 }
 
@@ -550,7 +620,8 @@ mod tests {
             CaptureStatus {
                 phase: CapturePhase::Idle,
                 requests: 0,
-                limit: None
+                limit: None,
+                enough: false,
             }
         );
         assert!(matches!(*cap.lock(), Flow::Idle));
@@ -590,6 +661,7 @@ mod tests {
                 phase: CapturePhase::Stopped,
                 requests: 0,
                 limit: Some(Limit::Time),
+                enough: false,
             }
         );
         assert!(!cap.is_idle());
@@ -608,6 +680,49 @@ mod tests {
         });
         assert!(!cap.keep_closed(|_| unreachable!("nothing is open")));
         assert!(matches!(&*cap.lock(), Flow::Stopped(s) if s.built.is_some()));
+    }
+
+    #[test]
+    fn the_windows_words_are_short_lines_and_the_box_keeps_its_steps() {
+        let said = CaptureTexts {
+            title: "Log in\nthen wait".into(),
+            stop: "  ".into(),
+            done_title: "Done\u{7}".into(),
+            done_stop: String::new(),
+            steps: "1. Log in.\r\n2. Wait.\u{7}\n3. Close.".into(),
+            ok: String::new(),
+        };
+        let (window, steps, ok) = window_words(&said);
+        assert_eq!(window.title, "Log inthen wait");
+        assert_eq!(window.done_title, "Done");
+        // Nothing to say is never an empty button or an empty box.
+        assert_eq!(window.stop, STOP_TEXT);
+        assert_eq!(window.done_stop, STOP_TEXT);
+        assert_eq!(ok, "OK");
+        // The steps keep their lines, and lose anything else that isn't text.
+        assert_eq!(steps, "1. Log in.\n2. Wait.\n3. Close.");
+        let long = CaptureTexts {
+            steps: "x".repeat(5000),
+            ..said
+        };
+        assert_eq!(window_words(&long).1.len(), STEPS_MAX);
+    }
+
+    #[test]
+    fn a_recording_says_when_enough_is_recorded() {
+        let router = Url::parse("http://192.168.8.1/").unwrap();
+        let cap = CaptureState::default();
+        *cap.lock() = Flow::Open(Recording::detached(&router));
+        // Nothing was recorded, so not yet. The window's own watch is what sets it.
+        assert_eq!(
+            cap.status(),
+            CaptureStatus {
+                phase: CapturePhase::Recording,
+                requests: 0,
+                limit: None,
+                enough: false,
+            }
+        );
     }
 
     #[test]

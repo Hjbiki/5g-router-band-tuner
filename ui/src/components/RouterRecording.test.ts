@@ -25,9 +25,9 @@ import RouterRecording from './RouterRecording.svelte'
 import type { CapturePreview } from '../lib/bindings/CapturePreview'
 import type { CaptureStatus } from '../lib/bindings/CaptureStatus'
 
-const idle: CaptureStatus = { phase: 'idle', requests: 0, limit: null }
-const running: CaptureStatus = { phase: 'recording', requests: 12, limit: null }
-const stopped: CaptureStatus = { phase: 'stopped', requests: 12, limit: null }
+const idle: CaptureStatus = { phase: 'idle', requests: 0, limit: null, enough: false }
+const running: CaptureStatus = { phase: 'recording', requests: 12, limit: null, enough: false }
+const stopped: CaptureStatus = { phase: 'stopped', requests: 12, limit: null, enough: false }
 const preview: CapturePreview = {
   text: '{"format":"router-band-tuner-capture/1"}',
   bytes: 2048,
@@ -114,10 +114,17 @@ describe('RouterRecording', () => {
     await mounted(idle)
     vi.mocked(api.captureStatus).mockResolvedValue(running)
     await begin()
-    // One press. The window's title and the text of its own Stop item say what to do there, in
-    // the user's language.
+    // One press. Everything the window says is in the user's language: its title and Stop item
+    // while it records and once enough is recorded, and the box of steps it opens with.
     await waitFor(() =>
-      expect(api.captureStart).toHaveBeenCalledWith(t('recording.windowTitle'), t('recording.windowStop')),
+      expect(api.captureStart).toHaveBeenCalledWith({
+        title: t('recording.windowTitle'),
+        stop: t('recording.windowStop'),
+        doneTitle: t('recording.windowDoneTitle'),
+        doneStop: t('recording.windowDoneStop'),
+        steps: t('recording.windowSteps'),
+        ok: t('recording.ok'),
+      }),
     )
     await waitFor(() => expect(screen.getByText(t('recording.running', { n: '12' }))).toBeTruthy())
     expect(button('recording.stop')).toBeTruthy()
@@ -132,6 +139,20 @@ describe('RouterRecording', () => {
       await fireEvent.click(button('recording.start'))
       await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(t(`recording.refused.${why}`)))
       expect(noButton('recording.stop')).toBeNull()
+    }
+  })
+
+  it('says when enough is recorded, so nobody has to guess how long to wait', async () => {
+    await mounted(running)
+    expect(screen.queryByText(t('recording.ready'))).toBeNull()
+    emit({ ...running, enough: true })
+    await waitFor(() => expect(screen.getByText(t('recording.ready'))).toBeTruthy())
+    // The box on the window: three numbered lines, with the wait in the middle one.
+    for (const lang of ['en', 'ar'] as const) {
+      setLanguage(lang)
+      const lines = t('recording.windowSteps').split('\n')
+      expect(lines).toHaveLength(3)
+      expect(lines.map((l) => l.slice(0, 2))).toEqual(['1.', '2.', '3.'])
     }
   })
 

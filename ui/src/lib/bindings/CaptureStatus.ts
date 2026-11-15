@@ -6,4 +6,9 @@ export type CaptureStatus = { phase: CapturePhase, requests: number,
 /**
  * Why the recording stopped taking more, when it did.
  */
-limit: Limit | null, };
+limit: Limit | null, 
+/**
+ * The router's page has logged in and finished loading: the window has told the person
+ * they can close it.
+ */
+enough: boolean, };

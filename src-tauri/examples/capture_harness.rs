@@ -44,6 +44,9 @@ static QUIT_IN_ORDER: AtomicBool = AtomicBool::new(false);
 
 /// What the window's Stop item is told to say.
 const STOP_TEXT: &str = "Stop and review";
+/// What the window is told to say once enough is recorded.
+const DONE_TITLE: &str = "Done. Close this window.";
+const DONE_STOP: &str = "Done: click here";
 
 /// The window's menu, as Windows has it.
 mod menu {
@@ -139,6 +142,7 @@ const AFTER: &str = r#"<!doctype html><meta charset="utf-8"><title>after login</
 <script>
 (async () => {
   await fetch('/api/status').then((r) => r.json());
+  await fetch('/api/signal').catch(() => {});
   let popup; try { popup = window.open('/popup') ? 'opened' : 'refused'; } catch (e) { popup = 'threw'; }
   await fetch('/note/popup', { method: 'POST', body: JSON.stringify({ popup }) });
   setTimeout(() => { location.href = '/redirect-away'; }, 100);
@@ -313,14 +317,14 @@ fn main() {
             }
         })
         .setup(move |app| {
-            let recording = capture_window::open(
-                app.handle(),
-                &router,
-                &profiles,
-                "capture harness",
-                STOP_TEXT,
-                show,
-            )?;
+            let texts = capture_window::Texts {
+                title: "capture harness".into(),
+                stop: STOP_TEXT.into(),
+                done_title: DONE_TITLE.into(),
+                done_stop: DONE_STOP.into(),
+            };
+            let recording =
+                capture_window::open(app.handle(), &router, &profiles, &texts, show)?;
             let handle = app.handle().clone();
             let other = format!("localhost:{port}");
             std::thread::spawn(move || {
@@ -330,7 +334,7 @@ fn main() {
                 // Let late answers, and a leak if the seal failed, arrive.
                 std::thread::sleep(Duration::from_millis(2500));
                 let later: Vec<String> = done_rx.try_iter().collect();
-                let (seen_so_far, _) = recording.progress();
+                let seen_so_far = recording.progress().requests;
                 let window = tauri::Manager::get_webview_window(&handle, capture_window::LABEL);
                 let hwnd = window
                     .as_ref()
@@ -338,6 +342,29 @@ fn main() {
                     .map_or(0, |h| h.0 as isize);
                 // The window's one control of its own, read before anything ends.
                 let item = menu::only_item(hwnd);
+                // The mock's page logged in a moment ago and has just asked for its last new
+                // thing: too soon to call it done. A few seconds on, the window must say so.
+                let title = |w: &Option<tauri::WebviewWindow>| {
+                    w.as_ref().and_then(|w| w.title().ok()).unwrap_or_default()
+                };
+                let early = (title(&window), recording.progress().enough);
+                let said = (0..24).any(|_| {
+                    std::thread::sleep(Duration::from_millis(500));
+                    recording.progress().enough && title(&window) == DONE_TITLE
+                });
+                let done_item = menu::only_item(hwnd).map(|(text, _)| text);
+                if early == ("capture harness".to_string(), false)
+                    && said
+                    && done_item.as_deref() == Ok(DONE_STOP)
+                {
+                    println!("CHECK ok   the window says Done once the page is in and quiet, and not before");
+                } else {
+                    println!(
+                        "CHECK FAIL the window says Done once the page is in and quiet, and not before: early {early:?}, said {said}, item {done_item:?}"
+                    );
+                    println!("HARNESS FAILED");
+                    std::process::exit(1);
+                }
                 if quit {
                     // What the app does with an open recording when it is told to exit is in the
                     // run loop below. The process ends there.
