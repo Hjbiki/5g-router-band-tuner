@@ -153,7 +153,7 @@ No. It's an independent project, and its source code is public.
 
 ## Contributing
 
-Reports from other routers help the most. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to report a router or operator, how to build the app and how to add a driver.
+Reports from other routers help the most. If yours isn't supported, **About › Record** captures how its own page talks to it, with everything private hidden, so it can be added. [CONTRIBUTING.md](CONTRIBUTING.md) explains how to report a router or operator, how to build the app and how to add a driver.
 
 ## License
 

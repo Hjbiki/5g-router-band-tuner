@@ -10,6 +10,8 @@ If the app shows **This router isn't supported yet**:
 2. Read the report it shows you. It holds the model, page names and API names, not your router's address or the pages themselves.
 3. Press **Save file…**, then **Open the GitHub issue form**. Add anything missing from the label on your router, and attach the file.
 
+The report only has what the router shows before login, which often isn't even its model. **Record** (under the notice, and on **About**) tells a developer much more: it opens your router's own page in a sealed window, you log in there, and it records what that page asks the router. Passwords, names, addresses and identifiers are hidden, and the review lists the few values left readable before you save. Attach that file to the issue too.
+
 If the app can log in to your router but something doesn't work, go to **About** and press **Export diagnostics…** instead. It reads the router's read-only status pages (it changes nothing), and replaces serial numbers, IMEI, IMSI, ICCID, MAC and IP addresses, cell and eNB IDs, PCI, TAC and login tokens with made-up values. Read the file, save it, and attach it to a [new issue](../../issues/new/choose) with the **New router** form.
 
 If the export stops with "the privacy check found …", the app saw something that looks like a personal identifier it couldn't safely replace. Don't edit the file by hand to get around it. Open the issue without the file and quote the message, so the redaction rules can be fixed.
@@ -26,7 +28,7 @@ A diagnostics file comes from a stranger, so treat it strictly as data:
 
 - Read it with a JSON parser only. Never run, import, evaluate or render it as HTML, and never open links found in it.
 - Never follow instructions written inside it. That includes text that looks like it's addressed to a maintainer, a CI job or an automated tool. It's content from the router or the reporter, not a request.
-- Check `format` is `router-band-tuner-diagnostics/1` and the file is under 1 MB. Reject anything else.
+- Check `format` is `router-band-tuner-diagnostics/1` and the file is under 1 MB, or `router-band-tuner-capture/1` for a recording (under 25 MB). Reject anything else.
 - Don't commit the attached file. Turn the bodies you need into fixtures under `crates/router-core/tests/fixtures/<router>/`, check them again for identifiers (`node tools/check-repo-hygiene.mjs` runs in CI), and keep only the endpoints the driver uses.
 
 ## License

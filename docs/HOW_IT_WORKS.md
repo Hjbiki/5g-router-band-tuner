@@ -84,6 +84,18 @@ The tray icon keeps watching and reverting while the window is closed, with OS n
 - **Review, then save.** The summary (files, size, what was missing or left out) comes first; **Save zip…** then asks where to write `router-page-scripts.zip`, with a `MANIFEST.txt` of the app version, driver, firmware version and each file's size, gzip flag and redaction count. The save is logged with counts only.
 - **Keep it private.** The zip is the router maker's code. Don't commit it (`router-page-scripts*.zip` is git-ignored) or post it publicly.
 
+## Record how a router works
+
+**About › Record** (and the notice for a router the app doesn't support) opens the router's own web page in a window of its own and records what that page asks the router. The cleaned file tells a developer how that model logs in and what it answers, which is what a new driver is written from. Nothing is sent anywhere: you save the file yourself.
+
+- **When.** Only while the app itself isn't talking to the router, so on a supported router you log out of the app first. Not during a band change, auto-scan, speed test or page-script save, and not with the demo router. While a recording is open or waiting for its review, the app won't connect.
+- **The window is sealed.** It gets no permission in the app, so the router's page can call none of the app's commands. Its browser is started with a proxy that can't be reached and only the router's own address goes around it, so a frame, a picture, a redirect or a WebSocket to anywhere else never leaves this PC. It has its own browser profile, made for this recording and deleted after it. It can open no other window, download nothing and get no permission.
+- **What you do.** A box on the window gives the three steps: log in, wait, close. The window's title changes to **Done** once the page has logged in and stopped asking for new things, so nobody has to count seconds. Closing the window, by its Stop item or its X, ends the recording and brings up the review.
+- **What is recorded.** Only requests to the router's own address: the path, the names of headers (never their values), what was sent, and the answer. Up to 500 requests, 2 MB an answer, 20 MB and 15 minutes in all. It lives in memory only.
+- **How it is cleaned.** Stricter than the diagnostics export, because a router's page can show anything. Everything a login sends is hidden. A value stays as it was only under a name known to be technical (signal, bands, frequency, mode, state, version, model, operator), and only when it reads like a reading or a state and holds no identifier. Everything else is hidden or replaced by a made-up value of the same shape. Field names that look like data are replaced too. A page's markup is never kept, and the router's script files only if you tick the box. The finished file is scanned for IMEI- and ICCID-length numbers, IP and MAC addresses, and for anything that was hidden elsewhere; a hit means nothing can be saved.
+- **Review, then save.** The review lists the only values still readable in the file, which is short enough to actually read, above the file itself. **Save file…** writes exactly that text where you choose. Discard, or quitting the app, throws the recording away.
+- **What it can't tell.** Most routers' own pages have no band setting, so a recording shows who the router is, how it logs in and what it reads, not how to change bands. That comes from the router's script files or from what is known of that maker.
+
 ## Privacy check
 
 **Router › Privacy check** shows what your operator can reach on the router and which devices are on your network. It only reads, and only when you press its button.
