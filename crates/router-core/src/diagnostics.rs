@@ -937,9 +937,7 @@ impl Redactor {
                 let hidden = self.holds_secret(&text);
                 if self.hides(key) || long_state || hidden || !identifier_hits(&text).is_empty() {
                     let fake = self.stand_in(&text, label, Hide::Unlisted);
-                    fake.parse::<u64>()
-                        .map(Value::from)
-                        .unwrap_or(Value::String(fake))
+                    self.fake_number(fake)
                 } else {
                     v.clone()
                 }
@@ -1020,9 +1018,7 @@ impl Redactor {
             Value::Number(n) => {
                 let why = self.named(key);
                 let fake = self.stand_in(&n.to_string(), label, why);
-                fake.parse::<u64>()
-                    .map(Value::from)
-                    .unwrap_or(Value::String(fake))
+                self.fake_number(fake)
             }
             Value::String(s) => {
                 let why = self.named(key);
@@ -1064,6 +1060,19 @@ impl Redactor {
             .map(String::as_str)
             .collect();
         held(text, &phrases)
+    }
+
+    /// A number's stand-in, as a number when it reads as one. One that starts with a zero prints
+    /// a digit shorter than it was made, and that printed form is this redactor's own too: the
+    /// last check must not take it for somebody's number.
+    fn fake_number(&mut self, fake: String) -> Value {
+        match fake.parse::<u64>() {
+            Ok(n) => {
+                self.generated.insert(n.to_string());
+                Value::from(n)
+            }
+            Err(_) => Value::String(fake),
+        }
     }
 
     /// Whether `value` is one of this redactor's own stand-ins, written in place of something.

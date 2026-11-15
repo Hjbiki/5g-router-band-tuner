@@ -1035,11 +1035,14 @@ fn build_knowing(
         return Err(leaks);
     }
     // These join after the scan, by their own rules: the vendor is one of a fixed list of
-    // names, and a version looks like an IP address.
+    // names, and a version looks like an IP address. They were read from the answers as they
+    // came, so one that the cleaning hid anywhere is somebody's (a device in a list of hosts
+    // has a model and a version too) and stays out.
+    let ours = |fact: Option<String>| fact.filter(|value| !red.holds_secret(value));
     file["router"]["vendor"] = json!(facts.vendor);
-    file["router"]["model"] = json!(facts.model);
-    file["router"]["hardware"] = json!(facts.hardware);
-    file["router"]["firmware"] = json!(facts.firmware);
+    file["router"]["model"] = json!(ours(facts.model));
+    file["router"]["hardware"] = json!(ours(facts.hardware));
+    file["router"]["firmware"] = json!(ours(facts.firmware));
     let text = serde_json::to_string_pretty(&file).map_err(|e| vec![e.to_string()])?;
     Ok(Built {
         readable: readable(&file, &red),
@@ -2038,6 +2041,47 @@ mod tests {
         get(&mut rec, "d2", "/api/monitoring/status");
         assert_eq!(rec.seen().distinct, before);
         assert!(rec.seen().requests > seen.requests);
+    }
+
+    #[test]
+    fn a_persons_device_is_never_taken_for_the_router_in_the_header() {
+        // The header joins the file after the cleaning. A list of the devices on the network
+        // names models too, and a host name can be shaped like one.
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/clients",
+            "application/json",
+            r#"{"hosts":[{"deviceName":"Hibi-TL-WA850RE","mac":"A4:B1:C2:D3:E4:F5","product_name":"Hibi-AX3000","fw_version":"9.9.1-hibi"}]}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        assert_eq!(v["router"]["model"], Value::Null, "{}", v["router"]);
+        assert_eq!(v["router"]["firmware"], Value::Null, "{}", v["router"]);
+        assert!(!text.contains("Hibi") && !text.contains("hibi"), "{text}");
+    }
+
+    #[test]
+    fn a_long_counter_never_stops_the_save() {
+        // A stand-in for a number is printed as a number, and one that starts with a zero prints
+        // a digit shorter: 15 digits, which the last check takes for an IMEI. A page that polls
+        // a microsecond counter made a refusal close to certain.
+        let mut rec = recorder();
+        for i in 0..60 {
+            poll(
+                &mut rec,
+                &i.to_string(),
+                "http://192.168.8.1/api/uptime",
+                "application/json",
+                &format!(
+                    r#"{{"uptime_us":{},"peers":{{"last_seen_us":{}}}}}"#,
+                    1794668197719123u64 + i,
+                    1794668197000000u64 + i
+                ),
+            );
+        }
+        let text = build(&rec.into_exchanges(), &opts()).expect("a clean file");
+        assert!(!text.contains("17946681977"));
     }
 
     #[test]
