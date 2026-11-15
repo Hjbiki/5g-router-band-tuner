@@ -156,6 +156,7 @@ const SOFT_MAX: usize = 256;
 /// Sensitive in a capture as well: a page can show messages, contacts and Wi-Fi secrets that the
 /// app's own reads never touch.
 const CAPTURE_SENSITIVE_PARTS: &[&str] = &[
+    "wps",
     "sms",
     "content",
     "message",
@@ -369,7 +370,9 @@ pub fn capture_sensitive(name: &str) -> bool {
     // cell's identity.
     let radio =
         ["band", "freq", "arfcn"].iter().any(|r| n.contains(r)) || w.iter().any(|x| x == "bw");
-    let excused = |p: &str| (p == "mask" && n.contains("band")) || (p == "cell" && radio);
+    // A cell's identity beside a radio word is still a cell's identity (`band_cellid`).
+    let cell_band = radio && !n.contains("cellid");
+    let excused = |p: &str| (p == "mask" && n.contains("band")) || (p == "cell" && cell_band);
     if SENSITIVE_TAGS.contains(&n.as_str())
         || SENSITIVE_PARTS.iter().any(|p| n.contains(p) && !excused(p))
         || CAPTURE_SENSITIVE_PARTS.iter().any(|p| n.contains(p))

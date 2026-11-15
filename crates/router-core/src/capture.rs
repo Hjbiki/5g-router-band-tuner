@@ -830,10 +830,17 @@ fn kept_file(x: &Exchange) -> bool {
         .response_headers
         .iter()
         .any(|h| h.eq_ignore_ascii_case("etag") || h.eq_ignore_ascii_case("last-modified"));
+    // A page answered under a script's name (a login page, once the session has run out) is
+    // markup, which is never kept.
+    let markup = x
+        .body
+        .as_deref()
+        .is_some_and(|text| text.trim_start().starts_with('<'));
     x.kind == Kind::Script
         && x.path.to_ascii_lowercase().ends_with(".js")
         && x.query.is_empty()
         && dated
+        && !markup
 }
 
 /// One exchange for the file, and its script's text when that may still be included.
@@ -1013,7 +1020,9 @@ fn readable(file: &Value, red: &Redactor) -> Vec<String> {
             // A body that is XML is kept as text.
             Value::String(s) if s.contains('<') => xml_values(s, leaf),
             Value::String(s) => leaf(s),
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            // A long number is listed whether the router wrote it as text or as a number.
+            Value::Number(n) => leaf(&n.to_string()),
+            Value::Null | Value::Bool(_) => {}
         }
     }
     let mut found = BTreeSet::new();
@@ -1937,6 +1946,13 @@ mod tests {
             "<response><NetworkMode>00</NetworkMode><LTEBand mode=\"auto\" mask=\"7FF\">80005</LTEBand>\
              <workmode>LTE</workmode><ulfreq>0555123456</ulfreq></response>",
         );
+        poll(
+            &mut rec,
+            "4",
+            "http://192.168.8.1/api/radio",
+            "application/json",
+            r#"{"dlfreq":9665000001,"rsrp":-97}"#,
+        );
         let exchanges = rec.into_exchanges();
         let built = build_with_readable(&exchanges, &opts()).expect("a clean file");
         assert_eq!(
@@ -1946,6 +1962,8 @@ mod tests {
                 "0555123456",
                 "11.0.2.21(H300SP5C7001)",
                 "5GHz",
+                // The same when the router wrote it as a number, not as text.
+                "9665000001",
                 "H122-373",
                 "LTE",
                 "WEBUI 11.0.2.1",
@@ -1978,6 +1996,9 @@ mod tests {
         // list a person checks. So the name alone has to hide it, even when the same name also
         // carries a word that would keep a number (`lock`, `code`, `status`, `mode`, `state`).
         const NAMES: &[&str] = &[
+            "band_cellid",
+            "earfcn_cellid",
+            "bw_cell_id",
             "pci",
             "lte_pci",
             "nr_pci_lock",
@@ -2010,14 +2031,14 @@ mod tests {
             "1",
             "http://192.168.8.1/api/cell",
             "application/json",
-            "{\"pci\":\"71000\",\"lte_pci\":\"71001\",\"nr_pci_lock\":\"71002\",\"pci_lock_state\":\"71003\",\"tac\":\"71004\",\"tac_code\":\"71005\",\"lac\":\"71006\",\"lac_code\":\"71007\",\"enb_id\":\"71008\",\"enodeb_lock\":\"71009\",\"gnb_id_status\":\"71010\",\"nci_mode\":\"71011\",\"eci_code\":\"71012\",\"cell_id\":\"71013\",\"cellid_lock\":\"71014\",\"cell_lock_status\":\"71015\",\"LockedCellId\":\"71016\",\"ServingCellStatus\":\"71017\",\"nr_cell_lock\":\"71018\",\"physical_cell_id\":\"71019\",\"tracking_area_code\":\"71020\",\"enbid\":\"71021\",\"gnbid\":\"71022\",\"cgi\":\"71023\",\"global_cell_id_mode\":\"71024\"}",
+            "{\"band_cellid\":\"7190\",\"earfcn_cellid\":\"7191\",\"bw_cell_id\":\"7192\",\"pci\":\"71000\",\"lte_pci\":\"71001\",\"nr_pci_lock\":\"71002\",\"pci_lock_state\":\"71003\",\"tac\":\"71004\",\"tac_code\":\"71005\",\"lac\":\"71006\",\"lac_code\":\"71007\",\"enb_id\":\"71008\",\"enodeb_lock\":\"71009\",\"gnb_id_status\":\"71010\",\"nci_mode\":\"71011\",\"eci_code\":\"71012\",\"cell_id\":\"71013\",\"cellid_lock\":\"71014\",\"cell_lock_status\":\"71015\",\"LockedCellId\":\"71016\",\"ServingCellStatus\":\"71017\",\"nr_cell_lock\":\"71018\",\"physical_cell_id\":\"71019\",\"tracking_area_code\":\"71020\",\"enbid\":\"71021\",\"gnbid\":\"71022\",\"cgi\":\"71023\",\"global_cell_id_mode\":\"71024\"}",
         );
         poll(
             &mut rec,
             "2",
             "http://192.168.8.1/api/cellxml",
             "text/xml",
-            "<response><pci>72000</pci><lte_pci>72001</lte_pci><nr_pci_lock>72002</nr_pci_lock><pci_lock_state>72003</pci_lock_state><tac>72004</tac><tac_code>72005</tac_code><lac>72006</lac><lac_code>72007</lac_code><enb_id>72008</enb_id><enodeb_lock>72009</enodeb_lock><gnb_id_status>72010</gnb_id_status><nci_mode>72011</nci_mode><eci_code>72012</eci_code><cell_id>72013</cell_id><cellid_lock>72014</cellid_lock><cell_lock_status>72015</cell_lock_status><LockedCellId>72016</LockedCellId><ServingCellStatus>72017</ServingCellStatus><nr_cell_lock>72018</nr_cell_lock><physical_cell_id>72019</physical_cell_id><tracking_area_code>72020</tracking_area_code><enbid>72021</enbid><gnbid>72022</gnbid><cgi>72023</cgi><global_cell_id_mode>72024</global_cell_id_mode><band>3</band></response>",
+            "<response><band_cellid>7290</band_cellid><earfcn_cellid>7291</earfcn_cellid><bw_cell_id>7292</bw_cell_id><pci>72000</pci><lte_pci>72001</lte_pci><nr_pci_lock>72002</nr_pci_lock><pci_lock_state>72003</pci_lock_state><tac>72004</tac><tac_code>72005</tac_code><lac>72006</lac><lac_code>72007</lac_code><enb_id>72008</enb_id><enodeb_lock>72009</enodeb_lock><gnb_id_status>72010</gnb_id_status><nci_mode>72011</nci_mode><eci_code>72012</eci_code><cell_id>72013</cell_id><cellid_lock>72014</cellid_lock><cell_lock_status>72015</cell_lock_status><LockedCellId>72016</LockedCellId><ServingCellStatus>72017</ServingCellStatus><nr_cell_lock>72018</nr_cell_lock><physical_cell_id>72019</physical_cell_id><tracking_area_code>72020</tracking_area_code><enbid>72021</enbid><gnbid>72022</gnbid><cgi>72023</cgi><global_cell_id_mode>72024</global_cell_id_mode><band>3</band></response>",
         );
         let built = build_with_readable(&rec.into_exchanges(), &opts()).expect("a clean file");
         let shown: Vec<&str> = NAMES
@@ -2030,6 +2051,11 @@ mod tests {
             .map(|(_, name)| *name)
             .collect();
         assert!(shown.is_empty(), "still readable under: {shown:?}");
+        // A radio word beside a cell's identity excuses nothing (`lte_ca_pcell_band` is a band;
+        // `band_cellid` is a cell).
+        for n in ["7190", "7191", "7192", "7290", "7291", "7292"] {
+            assert!(!built.text.contains(n), "{n}");
+        }
     }
 
     #[test]
@@ -2234,6 +2260,58 @@ mod tests {
         }
         let found = build(&rec.into_exchanges(), &opts()).unwrap_err();
         assert_eq!(found, [TOO_MANY_HIDDEN]);
+    }
+
+    #[test]
+    fn a_wps_pin_is_not_a_state_code() {
+        let mut rec = recorder();
+        poll(
+            &mut rec,
+            "1",
+            "http://192.168.8.1/api/wlan/wps",
+            "application/json",
+            r#"{"wps_code":"12345670","wps_pin":"87654321","lte_band":"3"}"#,
+        );
+        let (text, v) = built(rec, &opts());
+        assert!(
+            !text.contains("12345670") && !text.contains("87654321"),
+            "{text}"
+        );
+        assert_eq!(v["exchanges"][0]["response"]["lte_band"], json!("3"));
+    }
+
+    #[test]
+    fn a_page_served_under_a_scripts_name_is_never_included_as_code() {
+        // A router whose session ran out answers every address with its login page. Markup
+        // holds live values, and is never kept.
+        let mut rec = recorder();
+        sent(
+            &mut rec,
+            "1",
+            "GET",
+            "http://192.168.8.1/js/main.js",
+            "Script",
+            json!({}),
+            json!({}),
+        );
+        answered(&mut rec, "1", 200, "text/html", json!({ "ETag": "1" }));
+        finished(&mut rec, "1");
+        rec.response_body(
+            "1",
+            &json!({ "body": "  <html><body>Welcome back, Hibi-Home</body></html>", "base64Encoded": false })
+                .to_string(),
+        );
+        let opts = BuildOptions {
+            include_code: true,
+            ..opts()
+        };
+        let (text, v) = built(rec, &opts);
+        assert!(
+            v["exchanges"][0].get("text").is_none(),
+            "{}",
+            v["exchanges"][0]
+        );
+        assert!(!text.contains("Hibi-Home"));
     }
 
     #[test]
