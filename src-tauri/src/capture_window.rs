@@ -78,6 +78,23 @@ pub fn browser_args(router: &Url) -> Option<String> {
     ))
 }
 
+/// How large the window opens, from the screen's size in the same units. A router's page is laid
+/// out for a wide desktop window (a real Huawei one is 1350 wide, and scrolls sideways in less),
+/// so it gets that when the screen has room, and stays on the screen when it hasn't.
+pub fn window_size(screen: Option<(f64, f64)>) -> (f64, f64) {
+    const WANTED: (f64, f64) = (1380.0, 800.0);
+    const LEAST: (f64, f64) = (900.0, 600.0);
+    let Some((screen_w, screen_h)) = screen else {
+        return (1280.0, 760.0);
+    };
+    // Room for the window's own frame, its menu and the taskbar.
+    let fit = |wanted: f64, room: f64, least: f64| wanted.min(room).max(least);
+    (
+        fit(WANTED.0, screen_w - 40.0, LEAST.0),
+        fit(WANTED.1, screen_h - 100.0, LEAST.1),
+    )
+}
+
 /// Deletes the profile folders earlier recordings left behind: a profile holds the router's
 /// session cookie. Call it at launch, when no recording can be open.
 pub fn sweep_profiles(dir: &Path) {
@@ -190,6 +207,11 @@ fn open_sealed<R: Runtime>(
     let stop =
         MenuItem::with_id(app, STOP_ID, stop, true, None::<&str>).map_err(|e| e.to_string())?;
     let menu = Menu::with_items(app, &[&stop]).map_err(|e| e.to_string())?;
+    let screen = app.primary_monitor().ok().flatten().map(|m| {
+        let size = m.size().to_logical::<f64>(m.scale_factor());
+        (size.width, size.height)
+    });
+    let (width, height) = window_size(screen);
 
     let window = WebviewWindowBuilder::new(
         app,
@@ -198,7 +220,7 @@ fn open_sealed<R: Runtime>(
     )
     .title(title)
     .visible(visible)
-    .inner_size(1100.0, 760.0)
+    .inner_size(width, height)
     .menu(menu)
     .on_menu_event(|window, event| {
         if event.id().as_ref() == STOP_ID {
@@ -349,6 +371,18 @@ fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_is_as_wide_as_a_routers_page_when_the_screen_has_room() {
+        // Seen on a real H122: its page is 1350 wide, and a narrower window scrolls sideways.
+        assert_eq!(window_size(Some((2560.0, 1440.0))), (1380.0, 800.0));
+        assert_eq!(window_size(Some((1920.0, 1080.0))), (1380.0, 800.0));
+        // On a small laptop it stays on the screen, with room for the taskbar.
+        assert_eq!(window_size(Some((1366.0, 768.0))), (1326.0, 668.0));
+        // Never too small to use, and a sensible size when the screen can't be asked.
+        assert_eq!(window_size(Some((800.0, 600.0))), (900.0, 600.0));
+        assert_eq!(window_size(None), (1280.0, 760.0));
+    }
 
     #[test]
     fn only_the_routers_own_address_goes_around_the_dead_proxy() {

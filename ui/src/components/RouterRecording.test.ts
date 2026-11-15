@@ -53,10 +53,9 @@ async function mounted(status: CaptureStatus) {
   await Promise.resolve()
 }
 
-/** Opens the "before you start" points and presses the button that opens the router's page. */
+/** Presses Record, which opens the router's page. */
 async function begin() {
   await fireEvent.click(button('recording.start'))
-  await fireEvent.click(button('recording.begin'))
 }
 
 describe('RouterRecording', () => {
@@ -82,27 +81,40 @@ describe('RouterRecording', () => {
     vi.useRealTimers()
   })
 
-  it('says what will happen before anything opens, and can be backed out of', async () => {
+  it('shows three short steps before anything opens: record, log in, close', async () => {
     await mounted(idle)
-    expect(screen.queryByText(t('recording.before2'))).toBeNull()
-    await fireEvent.click(button('recording.start'))
-    // The three things a person must know first: what to do, that it is real, that nothing is sent.
-    for (const key of ['recording.before1', 'recording.before2', 'recording.before3', 'recording.passwordSafe'] as const) {
-      expect(screen.getByText(t(key))).toBeTruthy()
+    const steps = [...screen.getByRole('list').querySelectorAll('li')].map((li) => li.textContent)
+    expect(steps).toEqual([t('recording.step1'), t('recording.step2'), t('recording.step3')])
+    // Short enough to read at a glance, in every language.
+    for (const lang of ['en', 'ar'] as const) {
+      setLanguage(lang)
+      for (const key of ['recording.step1', 'recording.step2', 'recording.step3'] as const) {
+        expect(t(key).length).toBeLessThanOrEqual(60)
+      }
+      // Most routers' own pages have no band setting: nobody is told to change one.
+      expect(t('recording.step2')).not.toMatch(/band|نطاق/)
     }
     expect(api.captureStart).not.toHaveBeenCalled()
-    await fireEvent.click(button('recording.cancel'))
-    expect(screen.queryByText(t('recording.before2'))).toBeNull()
-    expect(api.captureStart).not.toHaveBeenCalled()
+  })
+
+  it('keeps the cautions one press away, behind the tip', async () => {
+    await mounted(idle)
+    // What a change there means, and that nothing is sent, is in the tip and not in the way.
+    for (const lang of ['en', 'ar'] as const) {
+      setLanguage(lang)
+      expect(t('recording.help')).toMatch(lang === 'en' ? /can't undo/ : /التراجع/)
+      expect(t('recording.help')).toMatch(lang === 'en' ? /Nothing is sent/ : /لا يُرسل/)
+    }
   })
 
   it('opens the router page with a title in the user language, then shows the count and Stop', async () => {
     await mounted(idle)
     vi.mocked(api.captureStatus).mockResolvedValue(running)
     await begin()
-    // The window's title and the text of its own Stop item, both in the user's language.
+    // One press. The window's title and the text of its own Stop item say what to do there, in
+    // the user's language.
     await waitFor(() =>
-      expect(api.captureStart).toHaveBeenCalledWith(t('recording.windowTitle'), t('recording.stop')),
+      expect(api.captureStart).toHaveBeenCalledWith(t('recording.windowTitle'), t('recording.windowStop')),
     )
     await waitFor(() => expect(screen.getByText(t('recording.running', { n: '12' }))).toBeTruthy())
     expect(button('recording.stop')).toBeTruthy()
@@ -111,11 +123,10 @@ describe('RouterRecording', () => {
 
   it('says why when a recording cannot start, and opens nothing', async () => {
     await mounted(idle)
-    await fireEvent.click(button('recording.start'))
-    // The points stay open after a refusal, so the same button can be pressed again.
+    // The button stays after a refusal, so it can be pressed again.
     for (const why of ['loggedIn', 'busy', 'demo', 'alreadyOpen', 'badAddress'] as const) {
       vi.mocked(api.captureStart).mockResolvedValue(why)
-      await fireEvent.click(button('recording.begin'))
+      await fireEvent.click(button('recording.start'))
       await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(t(`recording.refused.${why}`)))
       expect(noButton('recording.stop')).toBeNull()
     }
@@ -168,6 +179,18 @@ describe('RouterRecording', () => {
       setLanguage(lang)
       expect(t('recording.includeCodeHelp')).toMatch(lang === 'en' ? /list/ : /القائمة/)
     }
+  })
+
+  it('shows a short list whole, and only boxes a very long one', async () => {
+    // Seen in the real window: 19 values in a small scrolling box, most of them out of sight.
+    await mounted(running)
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    await fireEvent.click(button('recording.stop'))
+    expect((await screen.findByRole('list')).classList.contains('long')).toBe(false)
+    const many = Array.from({ length: 80 }, (_, i) => `value-${i}`)
+    vi.mocked(api.capturePreview).mockResolvedValue({ ...preview, readable: many, readableTotal: 80 })
+    await fireEvent.click(screen.getByRole('checkbox', { name: t('recording.includeCode') }))
+    await waitFor(() => expect(screen.getByRole('list').classList.contains('long')).toBe(true))
   })
 
   it('says how many more readable values the file has when the list is cut', async () => {
@@ -321,17 +344,6 @@ describe('RouterRecording', () => {
     // One that was already waiting when the app looked: the user comes to it when they like.
     takeCaptureStatus(stopped)
     expect(app.tab).toBe('dashboard')
-  })
-
-  it('tells people to look around, not to change bands: most routers have no band page', async () => {
-    await mounted(idle)
-    await fireEvent.click(button('recording.start'))
-    for (const lang of ['en', 'ar'] as const) {
-      setLanguage(lang)
-      const first = t('recording.before1')
-      expect(first).not.toMatch(/change bands|غيّر النطاقات/)
-      await waitFor(() => expect(screen.getByText(first)).toBeTruthy())
-    }
   })
 
   it('picks up a recording that is waiting for its review', async () => {

@@ -29,8 +29,6 @@
   const phase = $derived(recording.status.phase)
   const preview = $derived(recording.preview)
 
-  // The points a person reads before the router's page opens.
-  let armed = $state(false)
   let busy = $state(false)
   let error: string | null = $state(null)
   let refused: CaptureRefusal | null = $state(null)
@@ -54,10 +52,9 @@
 
   const begin = () =>
     act(async () => {
-      // The window's title, and the text of its own Stop item.
-      refused = await api.captureStart(t('recording.windowTitle'), t('recording.stop'))
+      // The window's title and the text of its own Stop item: they say what to do there.
+      refused = await api.captureStart(t('recording.windowTitle'), t('recording.windowStop'))
       if (refused) return
-      armed = false
       saved = false
       await refresh()
     })
@@ -149,29 +146,18 @@
     {:else if saved}
       <p role="status">{t('recording.saved')}</p>
     {/if}
-    {#if armed}
-      <ul>
-        <li>{t('recording.before1')}</li>
-        <li>{t('recording.before2')}</li>
-        <li>{t('recording.before3')}</li>
-      </ul>
-      <p class="k">{t('recording.passwordSafe')}</p>
-      <div class="row">
-        <button type="button" class="primary" disabled={busy} onclick={begin}>
-          <CircleDot size={16} aria-hidden="true" />{t('recording.begin')}
-        </button>
-        <button type="button" disabled={busy} onclick={() => ((armed = false), (refused = null))}>
-          {t('recording.cancel')}
-        </button>
-      </div>
-      {#if refused}<p class="err" role="alert">{t(`recording.refused.${refused}`)}</p>{/if}
-    {:else}
-      <div class="row">
-        <button type="button" class:primary={!saved} onclick={() => (armed = true)}>
-          <CircleDot size={16} aria-hidden="true" />{t('recording.start')}
-        </button>
-      </div>
-    {/if}
+    <!-- Three steps, and one press. The cautions are behind the tip above. -->
+    <ol>
+      <li>{t('recording.step1')}</li>
+      <li>{t('recording.step2')}</li>
+      <li>{t('recording.step3')}</li>
+    </ol>
+    <div class="row">
+      <button type="button" class:primary={!saved} disabled={busy} onclick={begin}>
+        <CircleDot size={16} aria-hidden="true" />{t('recording.start')}
+      </button>
+    </div>
+    {#if refused}<p class="err" role="alert">{t(`recording.refused.${refused}`)}</p>{/if}
   {:else if phase === 'recording'}
     <p role="status"><span class="dot" aria-hidden="true"></span>{t('recording.running', { n: count(recording.status.requests) })}</p>
     {#if recording.status.limit}<p class="k" role="status">{t(`recording.limit.${recording.status.limit}`)}</p>{/if}
@@ -190,7 +176,7 @@
       <!-- What a person can actually check: the file is far too long to read. Text only. -->
       {#if preview.readable.length}
         <p id="recording-readable">{t('recording.readable', { n: count(preview.readableTotal) })}</p>
-        <ul class="words" aria-labelledby="recording-readable">
+        <ul class="words" class:long={preview.readable.length > 60} aria-labelledby="recording-readable">
           {#each preview.readable as value, i (i)}<li><bdi dir="ltr">{value}</bdi></li>{/each}
         </ul>
         {#if preview.readableTotal > preview.readable.length}
@@ -247,14 +233,15 @@
   }
   .words {
     display: flex;
-    /* The points above are a column; these sit side by side and wrap. */
-    flex-direction: row;
     flex-wrap: wrap;
     gap: 6px;
     margin: 0;
     padding: 0;
     list-style: none;
-    max-block-size: 220px;
+  }
+  /* The list is there to be read, so it is shown whole. Only a very long one gets a box. */
+  .words.long {
+    max-block-size: 420px;
     overflow-y: auto;
   }
   .words li {
@@ -275,12 +262,12 @@
   strong {
     font-weight: 600;
   }
-  ul {
+  ol {
     display: flex;
     flex-direction: column;
     gap: 4px;
     margin: 0;
-    padding-inline-start: 20px;
+    padding-inline-start: 22px;
   }
   .row {
     display: flex;
