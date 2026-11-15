@@ -72,6 +72,8 @@ const EVENTS: [&str; 4] = [
 /// habit of going around a proxy for this PC's own addresses, so the list is exactly one host.
 /// The first option is what Tauri passes by default, and must be repeated when any is given:
 /// among other things it keeps SmartScreen from sending the router's addresses to Microsoft.
+/// A web proxy carries no UDP, so QUIC is switched off. A call set up by the page (WebRTC) is
+/// stopped by the profile's own setting (`seed_profile`), not here.
 pub fn browser_args(router: &Url) -> Option<String> {
     if !matches!(router.scheme(), "http" | "https") {
         return None;
@@ -80,8 +82,22 @@ pub fn browser_args(router: &Url) -> Option<String> {
     let port = router.port_or_known_default()?;
     Some(format!(
         "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+         --disable-quic \
          --proxy-server={DEAD_PROXY} --proxy-bypass-list=<-loopback>;{host}:{port}"
     ))
+}
+
+/// The browser's own setting that keeps a call (WebRTC) to what goes through the proxy, written
+/// into the fresh profile before the browser starts. The proxy carries no UDP and can't be
+/// reached, so a call set up by the page sends nothing. (The command-line option of the same
+/// meaning is not honoured by WebView2: the harness saw datagrams leave with it.)
+const PROFILE_PREFERENCES: &str = r#"{"webrtc":{"ip_handling_policy":"disable_non_proxied_udp","multiple_routes_enabled":false,"nonproxied_udp_enabled":false}}"#;
+
+fn seed_profile(profile: &Path) {
+    let dir = profile.join("EBWebView").join("Default");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join("Preferences"), PROFILE_PREFERENCES);
+    }
 }
 
 /// How the box of steps is drawn: an information box with one button, laid out right to left
@@ -280,6 +296,7 @@ fn open_sealed<R: Runtime>(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let profile = profiles.join(format!("{PROFILE_PREFIX}{}-{stamp}", std::process::id()));
+    seed_profile(&profile);
     let origin = router.origin().ascii_serialization();
     let stop = MenuItem::with_id(app, STOP_ID, &texts.stop, true, None::<&str>)
         .map_err(|e| e.to_string())?;
@@ -402,6 +419,20 @@ fn call(core: &ICoreWebView2, method: &str, params: &str, then: impl FnOnce(Stri
 /// Switches the recording on, then asks for the router's page: nothing the page does is missed.
 fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
     let started = Instant::now();
+    // The page is opened only in a window that is sealed and recorded: if any part of that
+    // fails, the window stays blank.
+    let mut sealed = true;
+    // The page has nothing to say to the window, and what it can say has brought the app down:
+    // a message from a page that made its own address too long.
+    // SAFETY: on the webview's own thread, with live COM pointers.
+    let quiet = unsafe {
+        core.Settings()
+            .and_then(|settings| settings.SetIsWebMessageEnabled(false))
+    };
+    if let Err(e) = quiet {
+        eprintln!("capture: the page's messages could not be switched off: {e}");
+        sealed = false;
+    }
     for name in EVENTS {
         let recorder = recorder.clone();
         let handler =
@@ -450,6 +481,7 @@ fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
         };
         if let Err(e) = added {
             eprintln!("capture: no receiver for {name}: {e}");
+            sealed = false;
         }
     }
 
@@ -465,10 +497,19 @@ fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
     // SAFETY: on the webview's own thread, with live COM pointers.
     if let Err(e) = unsafe { core.add_PermissionRequested(&deny, &mut token) } {
         eprintln!("capture: permission prompts could not be refused: {e}");
+        sealed = false;
+    }
+    if !sealed {
+        return;
     }
 
     let page = core.clone();
-    call(&core, "Network.enable", NETWORK_ENABLE, move |_| {
+    call(&core, "Network.enable", NETWORK_ENABLE, move |answer| {
+        // A failed call answers with nothing: the page would open unrecorded.
+        if answer.is_empty() {
+            eprintln!("capture: the recording could not be switched on");
+            return;
+        }
         // SAFETY: on the webview's own thread.
         if let Err(e) = unsafe { page.Navigate(&HSTRING::from(first.as_str())) } {
             eprintln!("capture: the router's page could not be opened: {e}");
@@ -516,6 +557,23 @@ mod tests {
         assert!(args.ends_with("--proxy-bypass-list=<-loopback>;192.168.8.1:80"));
         // Tauri's own default must still be there: it switches SmartScreen off.
         assert!(args.contains("msSmartScreenProtection"));
+        // A web proxy carries no UDP, so QUIC would go straight out.
+        assert!(args.contains("--disable-quic"));
+    }
+
+    #[test]
+    fn a_fresh_profile_starts_with_calls_kept_to_the_proxy() {
+        // The harness saw datagrams leave the window without this (WebRTC, to a server the page
+        // names). The browser reads it from the profile when it starts.
+        let dir = std::env::temp_dir().join(format!("rbt-seed-test-{}", std::process::id()));
+        seed_profile(&dir);
+        let written = std::fs::read_to_string(dir.join("EBWebView/Default/Preferences")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let prefs: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            prefs["webrtc"]["ip_handling_policy"],
+            "disable_non_proxied_udp"
+        );
         let tls = browser_args(&Url::parse("https://router.lan:8443/").unwrap()).unwrap();
         assert!(tls.ends_with(";router.lan:8443"));
         for not_web in ["file:///C:/x.html", "about:blank", "data:text/html,x"] {

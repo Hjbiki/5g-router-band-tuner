@@ -154,6 +154,11 @@ const post = (path, what) => fetch(path, { method: 'POST', headers: { 'Content-T
   catch (e) { ipc.pluginError = String((e && e.message) || e); }
   await post('/note/ipc', ipc);
 
+  // A page can make its own address as long as it likes and then speak to the window that
+  // holds it. That must not bring the app down.
+  try { history.replaceState(null, '', '/?' + 'a'.repeat(70000)); window.chrome.webview.postMessage('x'); } catch (e) {}
+  history.replaceState(null, '', '/');
+
   await new Promise((done) => { const x = new XMLHttpRequest(); x.open('POST', '/api/xhr');
     x.setRequestHeader('Content-Type', 'application/json'); x.onloadend = done; x.send(JSON.stringify({ lte_band_lock: '800C5' })); });
   await fetch('/api/gz').then((r) => r.arrayBuffer());
@@ -164,6 +169,9 @@ const post = (path, what) => fetch(path, { method: 'POST', headers: { 'Content-T
   tried.fetch = await within(fetch(other + '/fetch', { mode: 'no-cors' }), 4000).then(() => 'answered', (e) => 'failed: ' + e.message);
   tried.image = await within(new Promise((ok, no) => { const i = new Image(); i.onload = () => ok('loaded'); i.onerror = () => ok('failed'); i.src = other + '/pixel.png'; }), 4000).catch((e) => 'no answer');
   tried.socket = await within(new Promise((ok) => { const s = new WebSocket('ws://localhost:PORT/other/ws'); s.onopen = () => ok('opened'); s.onerror = () => ok('failed'); }), 4000).catch((e) => 'no answer');
+  // The same over UDP, which a web proxy never carries: a call set up through a server elsewhere.
+  try { const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:STUNADDR' }] }); pc.createDataChannel('x');
+    await pc.setLocalDescription(await pc.createOffer()); tried.rtc = 'asked'; } catch (e) { tried.rtc = 'failed: ' + e.message; }
   const frame = document.createElement('iframe'); frame.src = other + '/frame'; document.body.appendChild(frame);
   await new Promise((r) => setTimeout(r, 1500));
   await post('/note/other', tried);
@@ -185,6 +193,9 @@ const AFTER: &str = r#"<!doctype html><meta charset="utf-8"><title>after login</
 
 struct Mock {
     port: u16,
+    /// Where the page is told a server for calls is: this PC's own address, on a UDP port the
+    /// harness listens on. Nothing may arrive there.
+    stun: String,
     /// Every request as the server saw it: `host path`.
     seen: Mutex<Vec<String>>,
     notes: Mutex<Vec<String>>,
@@ -260,7 +271,7 @@ fn serve(mock: &Mock, mut stream: TcpStream) {
     let path = target.split('?').next().unwrap_or("");
     let port = mock.port.to_string();
     let (status, headers, bytes) = match (method, path) {
-        ("GET", "/") => page(&INDEX.replace("PORT", &port)),
+        ("GET", "/") => page(&INDEX.replace("PORT", &port).replace("STUNADDR", &mock.stun)),
         ("POST", p) if p.starts_with("/note/") => {
             mock.notes.lock().unwrap().push(format!("{p} {body}"));
             json("{}")
@@ -313,8 +324,18 @@ fn main() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a local port");
     let port = listener.local_addr().unwrap().port();
     let (done_tx, done_rx) = mpsc::channel::<String>();
+    // A UDP port on this PC's own address on the network (asking which address a socket would
+    // use sends nothing).
+    let udp = std::net::UdpSocket::bind(("0.0.0.0", 0)).expect("bind a UDP port");
+    udp.set_nonblocking(true)
+        .expect("a socket that doesn't wait");
+    let own = std::net::UdpSocket::bind(("0.0.0.0", 0))
+        .and_then(|s| s.connect(("192.0.2.1", 9)).and_then(|()| s.local_addr()))
+        .map_or_else(|_| "127.0.0.1".to_string(), |a| a.ip().to_string());
+    let stun = format!("{own}:{}", udp.local_addr().unwrap().port());
     let mock = Arc::new(Mock {
         port,
+        stun,
         seen: Mutex::default(),
         notes: Mutex::default(),
         done: Mutex::new(Some(done_tx)),
@@ -572,6 +593,16 @@ fn main() {
                     "the recorder counted while it ran",
                     seen_so_far >= 6,
                     seen_so_far.to_string(),
+                );
+                let mut datagrams = 0;
+                let mut buf = [0u8; 2048];
+                while udp.recv_from(&mut buf).is_ok() {
+                    datagrams += 1;
+                }
+                check(
+                    "nothing left the window by UDP either",
+                    datagrams == 0,
+                    format!("{datagrams} datagrams reached {}", mock.stun),
                 );
                 check(
                     "nothing of another host was recorded",
