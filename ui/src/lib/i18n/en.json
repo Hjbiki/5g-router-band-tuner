@@ -1441,7 +1441,6 @@
     "windowDoneTitle": "✔ Done. Close this window.",
     "windowDoneStop": "✔ Done. Click here, or close this window",
     "windowSteps": "1. Log in to your router in this window. Change nothing else.\n2. Wait until its page has loaded. The top of this window then says Done.\n3. Close this window.",
-    "ok": "OK",
     "ready": "Enough recorded. Close the router's window.",
     "step1": "Press Record.",
     "step2": "Log in on the router's page. Change nothing there.",

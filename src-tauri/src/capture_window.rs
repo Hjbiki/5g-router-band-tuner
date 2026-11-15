@@ -84,6 +84,50 @@ pub fn browser_args(router: &Url) -> Option<String> {
     ))
 }
 
+/// How the box of steps is drawn: an information box with one button, laid out right to left
+/// for a language that reads that way.
+pub fn steps_box_flags(rtl: bool) -> u32 {
+    const INFORMATION: u32 = 0x40;
+    const RIGHT: u32 = 0x0008_0000;
+    const RTL_READING: u32 = 0x0010_0000;
+    INFORMATION | if rtl { RIGHT | RTL_READING } else { 0 }
+}
+
+/// Shows the steps in a box on the recording window, where the person is looking. The box is
+/// Windows' own, owned by the window: the router's page can neither draw it nor answer it, and
+/// the window can't be used until it is read. False when there is no window to show it on.
+pub fn show_steps<R: Runtime>(app: &AppHandle<R>, title: &str, steps: &str, rtl: bool) -> bool {
+    #[cfg(not(windows))]
+    {
+        let _ = (app, title, steps, rtl);
+        false
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(owner: isize, text: *const u16, caption: *const u16, flags: u32) -> i32;
+        }
+        let Some(owner) = app
+            .get_webview_window(LABEL)
+            .and_then(|window| window.hwnd().ok())
+        else {
+            return false;
+        };
+        let owner = owner.0 as isize;
+        let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain([0]).collect() };
+        let (text, caption, flags) = (wide(steps), wide(title), steps_box_flags(rtl));
+        // On a thread of its own: the box waits for its button, and the window must go on
+        // loading and recording behind it.
+        std::thread::spawn(move || {
+            // SAFETY: both strings end in a zero and live until the call returns; a window that
+            // is gone by now just means the box has no owner.
+            unsafe { MessageBoxW(owner, text.as_ptr(), caption.as_ptr(), flags) };
+        });
+        true
+    }
+}
+
 /// How large the window opens, from the screen's size in the same units. A router's page is laid
 /// out for a wide desktop window (a real Huawei one is 1350 wide, and scrolls sideways in less),
 /// so it gets that when the screen has room, and stays on the screen when it hasn't.
@@ -435,6 +479,22 @@ fn attach(core: ICoreWebView2, recorder: Arc<Mutex<Recorder>>, first: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_box_of_steps_reads_right_to_left_in_a_right_to_left_language() {
+        // Seen in the real window: Arabic steps in a left-to-right box put each number at the
+        // wrong end of its line.
+        const RIGHT: u32 = 0x0008_0000;
+        const RTL_READING: u32 = 0x0010_0000;
+        assert_eq!(
+            steps_box_flags(true) & (RIGHT | RTL_READING),
+            RIGHT | RTL_READING
+        );
+        assert_eq!(steps_box_flags(false) & (RIGHT | RTL_READING), 0);
+        // An information box with one button, either way.
+        assert_eq!(steps_box_flags(true) & 0xFF, 0x40);
+        assert_eq!(steps_box_flags(false) & 0xFF, 0x40);
+    }
 
     #[test]
     fn the_window_is_as_wide_as_a_routers_page_when_the_screen_has_room() {

@@ -123,7 +123,7 @@ describe('RouterRecording', () => {
         doneTitle: t('recording.windowDoneTitle'),
         doneStop: t('recording.windowDoneStop'),
         steps: t('recording.windowSteps'),
-        ok: t('recording.ok'),
+        rtl: false,
       }),
     )
     await waitFor(() => expect(screen.getByText(t('recording.running', { n: '12' }))).toBeTruthy())
@@ -140,6 +140,14 @@ describe('RouterRecording', () => {
       await waitFor(() => expect(screen.getByRole('alert').textContent).toContain(t(`recording.refused.${why}`)))
       expect(noButton('recording.stop')).toBeNull()
     }
+  })
+
+  it('asks for a right-to-left box in a right-to-left language', async () => {
+    setLanguage('ar')
+    await mounted(idle)
+    vi.mocked(api.captureStatus).mockResolvedValue(running)
+    await begin()
+    await waitFor(() => expect(api.captureStart).toHaveBeenCalledWith(expect.objectContaining({ rtl: true })))
   })
 
   it('says when enough is recorded, so nobody has to guess how long to wait', async () => {

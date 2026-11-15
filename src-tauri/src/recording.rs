@@ -161,8 +161,8 @@ pub struct CaptureTexts {
     pub done_stop: String,
     /// The steps, shown in a box on the window when it opens.
     pub steps: String,
-    /// That box's one button.
-    pub ok: String,
+    /// The language reads right to left, so the box is laid out that way.
+    pub rtl: bool,
 }
 
 /// Why a recording can't start now.
@@ -337,7 +337,7 @@ fn short_line(text: &str) -> String {
 
 /// What the main window sent, made fit to show: one short line for a title or the Stop item, the
 /// steps with their line breaks and nothing else that isn't text, and never an empty button.
-fn window_words(said: &CaptureTexts) -> (capture_window::Texts, String, String) {
+fn window_words(said: &CaptureTexts) -> (capture_window::Texts, String) {
     let or_stop = |text: &str| {
         let line = short_line(text);
         if line.trim().is_empty() {
@@ -352,7 +352,6 @@ fn window_words(said: &CaptureTexts) -> (capture_window::Texts, String, String) 
         .filter(|c| *c == '\n' || !c.is_control())
         .take(STEPS_MAX)
         .collect();
-    let ok = short_line(&said.ok);
     (
         capture_window::Texts {
             title: short_line(&said.title),
@@ -361,11 +360,6 @@ fn window_words(said: &CaptureTexts) -> (capture_window::Texts, String, String) 
             done_stop: or_stop(&said.done_stop),
         },
         steps,
-        if ok.trim().is_empty() {
-            "OK".to_string()
-        } else {
-            ok
-        },
     )
 }
 
@@ -393,25 +387,14 @@ pub async fn capture_start(
     let Ok(router) = Url::parse(&format!("http://{host}/")) else {
         return Ok(Some(CaptureRefusal::BadAddress));
     };
-    let (words, steps, ok) = window_words(&texts);
+    let (words, steps) = window_words(&texts);
     let recording = capture_window::open(&app, &router, state.data_dir(), &words, true)
         .map_err(CmdError::Message)?;
     *cap.lock() = Flow::Open(recording);
     emit(&app, &cap);
-    // The steps, in a box on the window itself: it is where the person is looking, and the box
-    // is the app's own, which the router's page can neither draw nor answer.
-    if let (Some(window), false) = (
-        app.get_webview_window(capture_window::LABEL),
-        steps.trim().is_empty(),
-    ) {
-        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-        app.dialog()
-            .message(steps)
-            .title(words.title)
-            .kind(MessageDialogKind::Info)
-            .buttons(MessageDialogButtons::OkCustom(ok))
-            .parent(&window)
-            .show(|_| {});
+    // The steps, in a box on the window itself.
+    if !steps.trim().is_empty() {
+        capture_window::show_steps(&app, &words.title, &steps, texts.rtl);
     }
     Ok(None)
 }
@@ -690,15 +673,14 @@ mod tests {
             done_title: "Done\u{7}".into(),
             done_stop: String::new(),
             steps: "1. Log in.\r\n2. Wait.\u{7}\n3. Close.".into(),
-            ok: String::new(),
+            rtl: true,
         };
-        let (window, steps, ok) = window_words(&said);
+        let (window, steps) = window_words(&said);
         assert_eq!(window.title, "Log inthen wait");
         assert_eq!(window.done_title, "Done");
         // Nothing to say is never an empty button or an empty box.
         assert_eq!(window.stop, STOP_TEXT);
         assert_eq!(window.done_stop, STOP_TEXT);
-        assert_eq!(ok, "OK");
         // The steps keep their lines, and lose anything else that isn't text.
         assert_eq!(steps, "1. Log in.\n2. Wait.\n3. Close.");
         let long = CaptureTexts {

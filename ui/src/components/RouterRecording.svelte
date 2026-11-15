@@ -60,7 +60,7 @@
         doneTitle: t('recording.windowDoneTitle'),
         doneStop: t('recording.windowDoneStop'),
         steps: t('recording.windowSteps'),
-        ok: t('recording.ok'),
+        rtl: document.documentElement.dir === 'rtl',
       })
       if (refused) return
       saved = false

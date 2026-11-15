@@ -25,6 +25,6 @@ doneStop: string,
  */
 steps: string, 
 /**
- * That box's one button.
+ * The language reads right to left, so the box is laid out that way.
  */
-ok: string, };
+rtl: boolean, };

@@ -11,13 +11,14 @@
 //!   cargo rustc -p router-band-tuner --example capture_harness -- \
 //!     -C link-arg=/MANIFEST:EMBED \
 //!     -C link-arg=/MANIFESTINPUT:<full path to src-tauri\examples\common-controls.manifest>
-//!   target\debug\examples\capture_harness.exe [show] [close | stop | quit]
+//!   target\debug\examples\capture_harness.exe [show] [close | stop | quit] [box]
 //!
 //! Run it from `src-tauri`. Without `show` the window stays hidden. With `close` the recording
 //! is ended the way a person closing the window with X ends it, and with `stop` by the window's
 //! own Stop item, pressed the way Windows reports a click on it. With `quit` the app is told to
 //! exit while the recording is open: the app must hear of that before the window goes, because
-//! that is where it throws the recording away instead of keeping it for a review.
+//! that is where it throws the recording away instead of keeping it for a review. With `box` the
+//! box of steps is shown on the window first, found on the desktop and answered.
 //!
 //! It prints one `CHECK` line per check and ends with `HARNESS PASSED` or `HARNESS FAILED`.
 
@@ -47,6 +48,38 @@ const STOP_TEXT: &str = "Stop and review";
 /// What the window is told to say once enough is recorded.
 const DONE_TITLE: &str = "Done. Close this window.";
 const DONE_STOP: &str = "Done: click here";
+
+/// The box of steps, as Windows has it.
+mod steps_box {
+    #[link(name = "user32")]
+    extern "system" {
+        fn FindWindowW(class: *const u16, title: *const u16) -> isize;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn GetWindowLongW(hwnd: isize, index: i32) -> i32;
+        fn PostMessageW(hwnd: isize, message: u32, wparam: usize, lparam: isize) -> i32;
+    }
+    pub const TITLE: &str = "capture harness steps";
+
+    /// The box, if it is on the desktop and belongs to this process, and its extended style.
+    pub fn find() -> Option<(isize, u32)> {
+        let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain([0]).collect() };
+        let (class, title) = (wide("#32770"), wide(TITLE));
+        // SAFETY: both strings end in a zero; the handle is only asked about, never kept.
+        unsafe {
+            let hwnd = FindWindowW(class.as_ptr(), title.as_ptr());
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            (hwnd != 0 && pid == std::process::id())
+                .then(|| (hwnd, GetWindowLongW(hwnd, -20) as u32))
+        }
+    }
+
+    /// Answers the box the way its button, its X and Esc all do: by closing it.
+    pub fn answer(hwnd: isize) {
+        // SAFETY: posts one message (WM_CLOSE) to a window of this process.
+        unsafe { PostMessageW(hwnd, 0x0010, 0, 0) };
+    }
+}
 
 /// The window's menu, as Windows has it.
 mod menu {
@@ -275,6 +308,7 @@ fn main() {
     // the main thread, as the app does.
     let by_item = std::env::args().any(|a| a == "stop");
     let quit = std::env::args().any(|a| a == "quit");
+    let boxed = std::env::args().any(|a| a == "box");
     let by_hand = by_item || std::env::args().any(|a| a == "close");
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind a local port");
     let port = listener.local_addr().unwrap().port();
@@ -328,6 +362,37 @@ fn main() {
             let handle = app.handle().clone();
             let other = format!("localhost:{port}");
             std::thread::spawn(move || {
+                if boxed {
+                    // The app shows this right after the window opens. It must come up on the
+                    // desktop, laid out right to left when asked, and go when its button is
+                    // pressed; the page goes on loading behind it meanwhile.
+                    let started = capture_window::show_steps(&handle, steps_box::TITLE, "1. a
+2. b
+3. c", true);
+                    let wait = |want: bool| {
+                        (0..30).find_map(|_| {
+                            std::thread::sleep(Duration::from_millis(200));
+                            let found = steps_box::find();
+                            (found.is_some() == want).then_some(found)
+                        })
+                    };
+                    let shown = wait(true).flatten();
+                    if let Some((hwnd, _)) = shown {
+                        steps_box::answer(hwnd);
+                    }
+                    let gone = shown.is_some() && wait(false).is_some();
+                    // WS_EX_LAYOUTRTL: Windows mirrors the whole box for a right-to-left language.
+                    let rtl = shown.is_some_and(|(_, style)| style & 0x0040_0000 != 0);
+                    println!(
+                        "CHECK {} the box of steps comes up on the window, right to left, and goes when answered{}",
+                        if started && gone && rtl { "ok  " } else { "FAIL" },
+                        if started && gone && rtl { String::new() } else { format!(": started {started}, shown {shown:?}, gone {gone}") }
+                    );
+                    if !(started && gone && rtl) {
+                        println!("HARNESS FAILED");
+                        std::process::exit(1);
+                    }
+                }
                 let ended = done_rx
                     .recv_timeout(Duration::from_secs(45))
                     .unwrap_or_else(|_| "TIMEOUT".into());
