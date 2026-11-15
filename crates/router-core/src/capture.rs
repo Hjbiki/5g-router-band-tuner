@@ -479,6 +479,63 @@ pub struct BuildOptions<'a> {
     pub limit: Option<Limit>,
 }
 
+/// Limits on what is cleaned. A router's page is not trusted, and cleaning is the one place where
+/// what it sent costs work: every value is written out indented, and every kept value is checked
+/// against every hidden one. A real recording is tiny beside these (measured on a real router:
+/// under 10,000 values in all, under 3,000 in its largest answer, nested 3 deep, about a
+/// thousand hidden values), so they only ever stop a page that means harm.
+const MAX_BODY_VALUES: usize = 50_000;
+const MAX_VALUES: usize = 300_000;
+const MAX_DEPTH: usize = 32;
+const MAX_SECRETS: usize = 10_000;
+/// Written in place of a body that is over those limits.
+const TOO_MUCH: &str = "(left out: too large to clean safely)";
+/// What the save is refused with when there are more hidden values than can be checked.
+const TOO_MANY_HIDDEN: &str = "more hidden values than it can check";
+
+/// How much there is to clean in a body: its values, counted by what separates them. `None`
+/// when it nests deeper than any router's answer.
+fn weight(body: &str) -> Option<usize> {
+    let (mut depth, mut values) = (0usize, 0usize);
+    for b in body.bytes() {
+        match b {
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_DEPTH {
+                    return None;
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            b',' | b'<' | b'&' | b'=' => values += 1,
+            _ => {}
+        }
+    }
+    Some(values)
+}
+
+/// For each exchange: whether what it sent, and what it was answered, is too much to clean.
+/// Only what is cleaned counts: a page or a script is never parsed.
+fn too_much(exchanges: &[Exchange]) -> Vec<[bool; 2]> {
+    let mut left = MAX_VALUES;
+    let mut over = |body: Option<&str>| {
+        let Some(body) = body else { return false };
+        match weight(body) {
+            Some(n) if n <= MAX_BODY_VALUES && n <= left => {
+                left -= n;
+                false
+            }
+            _ => true,
+        }
+    };
+    exchanges
+        .iter()
+        .map(|x| {
+            let answer = x.body.as_deref().filter(|_| x.kind == Kind::Api);
+            [over(x.request_body.as_deref()), over(answer)]
+        })
+        .collect()
+}
+
 /// The names a request sends, and what it sends under a name that picks a command.
 #[derive(Default)]
 struct Sent {
@@ -785,6 +842,8 @@ fn entry<'a>(
     n: usize,
     x: &'a Exchange,
     include_code: bool,
+    // What it sent, and what it was answered, is too much to clean (`too_much`).
+    over: [bool; 2],
 ) -> (Value, Option<&'a str>) {
     let label = format!("x{n}");
     let login = login_shaped(x);
@@ -829,6 +888,7 @@ fn entry<'a>(
     if let Some(body) = &x.request_body {
         let at = format!("{label}.request");
         let sent = match form_fields(body) {
+            _ if over[0] => json!(TOO_MUCH),
             Some(fields) => red.json(&Value::Object(fields), &at),
             None => red.body(body, &at),
         };
@@ -851,6 +911,9 @@ fn entry<'a>(
     let mut note = x.note;
     let mut code = None;
     match (x.kind, x.body.as_deref()) {
+        (Kind::Api, Some(_)) if over[1] => {
+            out.insert("response".into(), json!(TOO_MUCH));
+        }
         (Kind::Api, Some(body)) => {
             out.insert(
                 "response".into(),
@@ -911,9 +974,15 @@ pub fn build_with_readable(
     exchanges: &[Exchange],
     opts: &BuildOptions<'_>,
 ) -> Result<Built, Vec<String>> {
+    let over = too_much(exchanges);
     let mut first = Redactor::with_rules(Rules::Capture);
     for (i, x) in exchanges.iter().enumerate() {
-        let _ = entry(&mut first, i + 1, x, false);
+        let _ = entry(&mut first, i + 1, x, false, over[i]);
+    }
+    // shortcut: a count, not a faster check; index the hidden values by word if real routers
+    // ever come near it.
+    if first.remembered() > MAX_SECRETS {
+        return Err(vec![TOO_MANY_HIDDEN.to_string()]);
     }
     build_knowing(exchanges, opts, &first)
 }
@@ -958,7 +1027,7 @@ fn readable(file: &Value, red: &Redactor) -> Vec<String> {
                 .chars()
                 .all(|c| c.is_ascii_digit() || "+-.,".contains(c));
         // The cleaner's own words aren't the router's.
-        let ours = [HIDDEN, LEFT_OUT, "*"].contains(&value) || red.made(value);
+        let ours = [HIDDEN, LEFT_OUT, TOO_MUCH, "*"].contains(&value) || red.made(value);
         if !(value.is_empty() || number || ours) {
             found.insert(value.to_string());
         }
@@ -991,13 +1060,14 @@ fn build_knowing(
         "apiPaths",
         "text",
     ];
+    let over = too_much(exchanges);
     let mut red = Redactor::knowing(Rules::Capture, first);
     let mut facts = Facts::default();
     let mut list = Vec::with_capacity(exchanges.len());
     let mut code = Vec::new();
     for (i, x) in exchanges.iter().enumerate() {
         facts.read(x);
-        let (value, text) = entry(&mut red, i + 1, x, opts.include_code);
+        let (value, text) = entry(&mut red, i + 1, x, opts.include_code, over[i]);
         list.push(value);
         if let Some(text) = text {
             code.push((i, text));
@@ -2082,6 +2152,88 @@ mod tests {
         }
         let text = build(&rec.into_exchanges(), &opts()).expect("a clean file");
         assert!(!text.contains("17946681977"));
+    }
+
+    #[test]
+    fn a_body_too_large_or_too_deep_to_clean_is_left_out_and_says_so() {
+        // A hostile page could answer with something that takes gigabytes or hours to clean
+        // (the review runs it, and the app would die or hang at "Stop and review"). Real answers
+        // are tiny beside these limits: a whole real recording holds under 10,000 values, its
+        // largest answer under 3,000, nested three deep.
+        let mut rec = recorder();
+        let json = |rec: &mut Recorder, id: &str, body: &str| {
+            poll(
+                rec,
+                id,
+                &format!("http://192.168.8.1/api/{id}"),
+                "application/json",
+                body,
+            );
+        };
+        json(&mut rec, "ok", r#"{"lte_band":"3","rsrp":"-97"}"#);
+        // Nested far deeper than any router's answer: every value would be indented by it.
+        let deep = format!(
+            "{}1{}",
+            "[".repeat(MAX_DEPTH + 1),
+            "]".repeat(MAX_DEPTH + 1)
+        );
+        json(&mut rec, "deep", &deep);
+        // More values in one answer than a router sends in a whole session.
+        let wide = format!("[{}1]", "1,".repeat(MAX_BODY_VALUES + 1));
+        json(&mut rec, "wide", &wide);
+        // Many answers, each allowed, that together are too much.
+        let fair = format!("[{}1]", "1,".repeat(MAX_BODY_VALUES - 1));
+        for i in 0..(MAX_VALUES / MAX_BODY_VALUES + 2) {
+            json(&mut rec, &format!("fair{i}"), &fair);
+        }
+        json(&mut rec, "late", r#"{"lte_band":"7"}"#);
+        let started = std::time::Instant::now();
+        let (text, v) = built(rec, &opts());
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        let of = |id: &str| {
+            let path = format!("/api/{id}");
+            v["exchanges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|x| x["path"] == path.as_str())
+                .cloned()
+                .unwrap()
+        };
+        assert_eq!(of("ok")["response"]["lte_band"], json!("3"));
+        for id in ["deep", "wide"] {
+            assert_eq!(of(id)["response"], json!(TOO_MUCH), "{id}");
+        }
+        // The first of the fair ones is cleaned, the last is not; what is left out says so.
+        assert!(of("fair0")["response"].is_array());
+        assert_eq!(
+            of(&format!("fair{}", MAX_VALUES / MAX_BODY_VALUES + 1))["response"],
+            json!(TOO_MUCH)
+        );
+        // Something small still fits afterwards: it is size that is refused, not what comes late.
+        assert_eq!(of("late")["response"]["lte_band"], json!("7"));
+        assert!(text.len() < 40 * 1024 * 1024, "{}", text.len());
+    }
+
+    #[test]
+    fn more_hidden_values_than_can_be_checked_stop_the_save() {
+        // Every kept value is checked against every hidden one. Past a count no real router
+        // reaches, that is hours of work a hostile page could ask for.
+        let mut rec = recorder();
+        for part in 0..3 {
+            let hosts: Vec<String> = (0..MAX_SECRETS / 2)
+                .map(|i| format!(r#"{{"mac":"dev-{part}-{i}-x"}}"#))
+                .collect();
+            poll(
+                &mut rec,
+                &part.to_string(),
+                &format!("http://192.168.8.1/api/hosts{part}"),
+                "application/json",
+                &format!("[{}]", hosts.join(",")),
+            );
+        }
+        let found = build(&rec.into_exchanges(), &opts()).unwrap_err();
+        assert_eq!(found, [TOO_MANY_HIDDEN]);
     }
 
     #[test]

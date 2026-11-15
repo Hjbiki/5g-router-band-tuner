@@ -1075,6 +1075,11 @@ impl Redactor {
         }
     }
 
+    /// How many hidden values this redactor remembers for its checks.
+    pub(crate) fn remembered(&self) -> usize {
+        self.secrets.len()
+    }
+
     /// Whether `value` is one of this redactor's own stand-ins, written in place of something.
     pub(crate) fn made(&self, value: &str) -> bool {
         self.generated.contains(value)
