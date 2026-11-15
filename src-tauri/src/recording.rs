@@ -71,6 +71,29 @@ impl CaptureState {
         matches!(*self.lock(), Flow::Idle)
     }
 
+    /// Keeps a cleaned file, but only for the recording it was built from: cleaning takes
+    /// seconds, and by then that one may be gone and another waiting.
+    fn keep_built(&self, of: &Arc<Vec<Exchange>>, text: Option<String>) -> bool {
+        match &mut *self.lock() {
+            Flow::Stopped(s) if Arc::ptr_eq(&s.exchanges, of) => {
+                s.built = text;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Forgets the recording whose file was just saved, and only that one: the save dialog
+    /// stays open as long as the person likes.
+    fn forget_saved(&self, of: &Arc<Vec<Exchange>>) -> bool {
+        let mut flow = self.lock();
+        let same = matches!(&*flow, Flow::Stopped(s) if Arc::ptr_eq(&s.exchanges, of));
+        if same {
+            *flow = Flow::Idle;
+        }
+        same
+    }
+
     /// The window of an open recording is gone: `finish` ends it, and what it hands over waits
     /// for the review. False when no recording was open (Stop or Discard already took it).
     fn keep_closed(
@@ -288,6 +311,7 @@ async fn preview(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64);
     let requests = u32::try_from(exchanges.len()).unwrap_or(u32::MAX);
+    let of = exchanges.clone();
     let built = tokio::task::spawn_blocking(move || {
         let opts = BuildOptions {
             app_version: &version,
@@ -310,10 +334,9 @@ async fn preview(
         .map(|t| head(t, PREVIEW_BYTES).to_string())
         .unwrap_or_default();
     let bytes = text.as_ref().map_or(0, String::len);
-    // The flow may have moved on while this ran (Discard): only a waiting recording keeps it.
-    if let Flow::Stopped(s) = &mut *cap.lock() {
-        s.built = text;
-    }
+    // The flow may have moved on while this ran (Discard, then another recording): only the
+    // recording this was built from keeps it.
+    cap.keep_built(&of, text);
     Ok(CapturePreview {
         truncated: shown.len() < bytes,
         text: shown,
@@ -387,6 +410,9 @@ pub async fn capture_start(
     let Ok(router) = Url::parse(&format!("http://{host}/")) else {
         return Ok(Some(CaptureRefusal::BadAddress));
     };
+    // No recording is open, so any profile folder is a leftover: its browser held on to it
+    // past the wait when it closed. It holds the router's session cookie.
+    capture_window::sweep_profiles(state.data_dir());
     let (words, steps) = window_words(&texts);
     let recording = capture_window::open(&app, &router, state.data_dir(), &words, true)
         .map_err(CmdError::Message)?;
@@ -446,8 +472,8 @@ pub async fn capture_preview(
 #[tauri::command]
 pub async fn capture_save(app: AppHandle, cap: State<'_, CaptureState>) -> Result<bool, CmdError> {
     use tauri_plugin_dialog::DialogExt;
-    let Some(text) = (match &*cap.lock() {
-        Flow::Stopped(s) => s.built.clone(),
+    let Some((text, of)) = (match &*cap.lock() {
+        Flow::Stopped(s) => s.built.clone().map(|text| (text, s.exchanges.clone())),
         _ => None,
     }) else {
         return Err(CmdError::Message("there is no cleaned file to save".into()));
@@ -470,8 +496,7 @@ pub async fn capture_save(app: AppHandle, cap: State<'_, CaptureState>) -> Resul
     .await
     .map_err(|e| CmdError::Message(e.to_string()))?
     .map_err(CmdError::Message)?;
-    if saved {
-        *cap.lock() = Flow::Idle;
+    if saved && cap.forget_saved(&of) {
         emit(&app, &cap);
     }
     Ok(saved)
@@ -705,6 +730,33 @@ mod tests {
                 enough: false,
             }
         );
+    }
+
+    #[test]
+    fn a_file_belongs_to_the_recording_it_was_built_from() {
+        // Cleaning takes seconds, and a save dialog stays open as long as the person likes.
+        // Meanwhile the recording can be thrown away and another made.
+        let waiting = |cap: &CaptureState| {
+            let exchanges = Arc::new(Vec::new());
+            *cap.lock() = Flow::Stopped(Stopped {
+                exchanges: exchanges.clone(),
+                limit: None,
+                built: None,
+            });
+            exchanges
+        };
+        let cap = CaptureState::default();
+        let old = waiting(&cap);
+        let new = waiting(&cap);
+        // A file built from the old one is not kept as the new one's, so Save can't write it.
+        assert!(!cap.keep_built(&old, Some("the old recording's file".into())));
+        assert!(matches!(&*cap.lock(), Flow::Stopped(s) if s.built.is_none()));
+        // A save of the old one that ends now forgets nothing of the new one.
+        assert!(!cap.forget_saved(&old));
+        assert!(!cap.is_idle());
+        assert!(cap.keep_built(&new, Some("the new recording's file".into())));
+        assert!(cap.forget_saved(&new));
+        assert!(cap.is_idle());
     }
 
     #[test]

@@ -14,7 +14,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 router-core = { path = "../crates/router-core" }
-tauri = { version = "2", features = ["tray-icon"] }
+# Not below this: the recording window relies on Tauri refusing every command from a page that
+# has no capability, which examples/capture_harness.rs checks on each release.
+tauri = { version = "2.11.6", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"

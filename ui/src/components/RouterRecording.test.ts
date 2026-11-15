@@ -225,6 +225,19 @@ describe('RouterRecording', () => {
     await waitFor(() => expect(screen.getByRole('list').classList.contains('long')).toBe(true))
   })
 
+  it('shows the script box ticked wherever the recording is shown, once the file holds the scripts', async () => {
+    // Two places can show one recording. The box says what the file holds, not what was pressed here.
+    vi.mocked(api.captureStatus).mockResolvedValue(stopped)
+    vi.mocked(api.capturePreview).mockResolvedValueOnce(preview).mockResolvedValue({ ...preview, codeIncluded: true })
+    render(RouterRecording)
+    render(RouterRecording)
+    const boxes = () => screen.getAllByRole('checkbox', { name: t('recording.includeCode') }) as HTMLInputElement[]
+    await waitFor(() => expect(boxes()).toHaveLength(2))
+    expect(boxes().map((b) => b.checked)).toEqual([false, false])
+    await fireEvent.click(boxes()[0])
+    await waitFor(() => expect(boxes().map((b) => b.checked)).toEqual([true, true]))
+  })
+
   it('says how many more readable values the file has when the list is cut', async () => {
     vi.mocked(api.captureStop).mockResolvedValue({ ...preview, readableTotal: 340 })
     await mounted(running)

@@ -32,7 +32,6 @@
   let busy = $state(false)
   let error: string | null = $state(null)
   let refused: CaptureRefusal | null = $state(null)
-  let includeCode = $state(false)
   let saved = $state(false)
 
   async function act(work: () => Promise<void>) {
@@ -68,14 +67,13 @@
     })
   const stop = () =>
     act(async () => {
-      includeCode = false
       const shown = await api.captureStop()
       await refresh()
       recording.preview = shown
     })
-  const rebuild = () =>
+  const rebuild = (code: boolean) =>
     act(async () => {
-      recording.preview = await api.capturePreview(includeCode)
+      recording.preview = await api.capturePreview(code)
     })
   const save = () =>
     act(async () => {
@@ -108,7 +106,6 @@
   $effect(() => {
     if (phase !== 'stopped' || preview || busy || error) return
     void act(async () => {
-      includeCode = false
       recording.preview = await loadPreview()
     })
   })
@@ -206,7 +203,13 @@
       <textarea dir="ltr" readonly rows="8" aria-labelledby="recording-review" value={preview.text}></textarea>
       {#if preview.truncated}<p class="k">{t('recording.truncated')}</p>{/if}
       <label class="code">
-        <input type="checkbox" bind:checked={includeCode} disabled={busy} onchange={rebuild} />
+        <!-- What the file holds, not what was pressed here: two places can show one recording. -->
+        <input
+          type="checkbox"
+          checked={preview.codeIncluded}
+          disabled={busy}
+          onchange={(e) => rebuild(e.currentTarget.checked)}
+        />
         <span>{t('recording.includeCode')}</span>
       </label>
       <p class="k">{t('recording.includeCodeHelp')}</p>
