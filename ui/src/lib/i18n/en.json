@@ -1439,7 +1439,7 @@
     "windowTitle": "Log in, then close this window",
     "windowStop": "Done? Click here, or just close this window",
     "step1": "Press Record.",
-    "step2": "Log in on the router's page that opens.",
+    "step2": "Log in on the router's page. Change nothing there.",
     "step3": "Close that window, then check the file here.",
     "running": "Recording: {n} requests",
     "stop": "Stop and review",

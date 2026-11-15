@@ -93,6 +93,9 @@ describe('RouterRecording', () => {
       }
       // Most routers' own pages have no band setting: nobody is told to change one.
       expect(t('recording.step2')).not.toMatch(/band|نطاق/)
+      // The one caution that stays in view: a router's home page has switches one press away
+      // (the real one has "Disable Mobile Data"), and this app can't undo what is pressed there.
+      expect(t('recording.step2')).toMatch(lang === 'en' ? /Change nothing/ : /لا تغيّر/)
     }
     expect(api.captureStart).not.toHaveBeenCalled()
   })
