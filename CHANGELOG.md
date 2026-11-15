@@ -4,6 +4,12 @@ All notable changes to 5G Router Band Tuner. Versions follow [Semantic Versionin
 
 > **Going back to an older version:** a version without APN switching (0.1.0 and earlier) ignores an open APN change in `pending-apn-change.json`, and one without Refresh IP ignores mobile data left off in `pending-data-switch.json`. Let a change finish, or undo it, and make sure mobile data is on before you install an older version.
 
+## [1.2.0] - 2026-11-15
+
+### Added
+
+- **Record how your router works:** if your router isn't supported yet, the app can now open the router's own page in a sealed window and record what that page asks the router, so a developer can add your model. A box on the window gives the steps: log in, wait until the window says Done, close it. Passwords, names, addresses and identifiers are hidden, and you see the few values left readable before you save the file yourself. Nothing is sent anywhere. It is under **About**, and in the notice for a router the app doesn't support. On a supported router, log out of the app first.
+
 ## [1.1.0] - 2026-11-14
 
 ### Added
